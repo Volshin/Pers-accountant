@@ -3,14 +3,13 @@
 Watchdog service: monitors inbox/ for new PDF files, processes them,
 and writes a text summary to reports/.
 
-Directory layout (configured via env or defaults below):
     ~/finance/
-    ├── inbox/      ← drop PDFs here (Samba share)
-    └── reports/    ← summaries appear here automatically
+    ├── inbox/    ← drop PDFs here (Samba share)
+    ├── reports/  ← summaries appear here automatically
+    └── done/     ← processed PDFs archived here
 """
 import os
 import sys
-import time
 import logging
 import shutil
 import threading
@@ -18,29 +17,33 @@ from datetime import datetime
 from pathlib import Path
 
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileCreatedEvent
+from watchdog.events import FileSystemEventHandler
 
 from core.categorizer import categorize_all
 from core.db import insert_transactions
 from core.detector import detect_adapter
 
-_in_progress: set[str] = set()
-_lock = threading.Lock()
-
-BASE_DIR = Path(os.environ.get("FINANCE_DIR", Path.home() / "finance"))
+BASE_DIR    = Path(os.environ.get("FINANCE_DIR", Path.home() / "finance"))
 INBOX_DIR   = BASE_DIR / "inbox"
 REPORTS_DIR = BASE_DIR / "reports"
-DONE_DIR    = BASE_DIR / "done"     # processed PDFs moved here
+DONE_DIR    = BASE_DIR / "done"
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s  %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler(BASE_DIR / "watcher.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
+
+_in_progress: set[str] = set()
+_lock = threading.Lock()
+
+
+def _is_pdf(path: Path) -> bool:
+    return path.suffix.lower() == ".pdf" and not path.name.startswith(".")
 
 
 def process_pdf(pdf_path: Path) -> None:
@@ -49,84 +52,92 @@ def process_pdf(pdf_path: Path) -> None:
             return
         _in_progress.add(pdf_path.name)
 
-    log.info(f"Processing: {pdf_path.name}")
+    log.info(f"{'─' * 52}")
+    log.info(f"Файл:       {pdf_path.name}")
 
     try:
         adapter = detect_adapter(str(pdf_path))
-        log.info(f"  Adapter: {adapter.bank_name}")
+        log.info(f"Банк:       {adapter.bank_name}")
 
         df = adapter.parse(str(pdf_path))
         if df.empty:
-            log.warning(f"  No transactions parsed from {pdf_path.name}")
+            log.warning("Транзакции не найдены — файл пропущен")
             return
 
-        log.info(f"  Parsed {len(df)} transactions, categorizing…")
+        log.info(f"Транзакций: {len(df)}")
+        log.info("Категоризирую через Ollama…")
         df["category"] = categorize_all(df["description"].tolist())
 
         inserted, skipped = insert_transactions(df)
-        log.info(f"  Saved {inserted} new, {skipped} duplicates skipped")
+        log.info(f"Сохранено:  {inserted} новых, {skipped} дублей пропущено")
 
-        _write_report(pdf_path.stem, df, adapter.bank_name)
+        report_path = _write_report(pdf_path.stem, df, adapter.bank_name)
+        log.info(f"Отчёт:      {report_path.name}")
+        _log_summary(df)
 
-        dest = DONE_DIR / pdf_path.name
-        shutil.move(str(pdf_path), str(dest))
-        log.info(f"  Moved to done/{pdf_path.name}")
+        shutil.move(str(pdf_path), str(DONE_DIR / pdf_path.name))
+        log.info(f"Файл перемещён в done/")
 
     except Exception as e:
-        log.error(f"  Failed to process {pdf_path.name}: {e}", exc_info=True)
+        log.error(f"Ошибка: {e}", exc_info=True)
     finally:
         with _lock:
             _in_progress.discard(pdf_path.name)
 
 
-def _write_report(stem: str, df, bank: str) -> None:
+def _write_report(stem: str, df, bank: str) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = REPORTS_DIR / f"{timestamp}_{stem}_summary.txt"
+    path = REPORTS_DIR / f"{timestamp}_{stem}.txt"
 
     lines = [
-        f"{'='*50}",
-        f"  Сводка: {stem}",
-        f"  Банк:   {bank}",
-        f"  Дата:   {datetime.now().strftime('%d.%m.%Y %H:%M')}",
-        f"{'='*50}",
+        "=" * 52,
+        f"  Файл:  {stem}",
+        f"  Банк:  {bank}",
+        f"  Дата:  {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        "=" * 52,
     ]
+    lines.extend(_summary_lines(df))
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
+
+def _summary_lines(df) -> list[str]:
+    lines = []
     expenses = df[df["amount"] < 0]
     income   = df[df["amount"] > 0]
 
     for cur, group in expenses.groupby("currency"):
         lines.append(f"\nРасходы ({cur})")
-        lines.append("-" * 35)
-        summary = group.groupby("category")["amount"].sum().sort_values()
-        for cat, total in summary.items():
-            lines.append(f"  {cat:<18} {total:>10.2f} {cur}")
-        lines.append(f"  {'ИТОГО':<18} {group['amount'].sum():>10.2f} {cur}")
+        lines.append("─" * 38)
+        for cat, total in group.groupby("category")["amount"].sum().sort_values().items():
+            lines.append(f"  {cat:<20} {total:>9.2f} {cur}")
+        lines.append(f"  {'ИТОГО':<20} {group['amount'].sum():>9.2f} {cur}")
 
     for cur, group in income.groupby("currency"):
         lines.append(f"\nДоходы ({cur})")
-        lines.append("-" * 35)
-        summary = group.groupby("category")["amount"].sum().sort_values(ascending=False)
-        for cat, total in summary.items():
-            lines.append(f"  {cat:<18} {total:>10.2f} {cur}")
-        lines.append(f"  {'ИТОГО':<18} {group['amount'].sum():>10.2f} {cur}")
+        lines.append("─" * 38)
+        for cat, total in group.groupby("category")["amount"].sum().sort_values(ascending=False).items():
+            lines.append(f"  {cat:<20} {total:>9.2f} {cur}")
+        lines.append(f"  {'ИТОГО':<20} {group['amount'].sum():>9.2f} {cur}")
 
-    lines.append(f"\nВсего транзакций: {len(df)}")
-    lines.append("=" * 50)
+    lines.append(f"\n  Всего транзакций: {len(df)}")
+    lines.append("=" * 52)
+    return lines
 
-    report_path.write_text("\n".join(lines), encoding="utf-8")
-    log.info(f"  Report written: {report_path.name}")
+
+def _log_summary(df) -> None:
+    for line in _summary_lines(df):
+        if line.strip():
+            log.info(line)
 
 
 class PDFHandler(FileSystemEventHandler):
-    def on_created(self, event: FileCreatedEvent) -> None:
+    def on_closed(self, event) -> None:
+        """Fires on Linux when the file is fully written and closed (inotify IN_CLOSE_WRITE)."""
         if event.is_directory:
             return
         path = Path(event.src_path)
-        if path.suffix.lower() != ".pdf" or path.name.startswith("._"):
-            return
-        # Brief wait — some apps write the file in chunks
-        time.sleep(1)
-        if path.exists():
+        if _is_pdf(path):
             process_pdf(path)
 
 
@@ -134,20 +145,19 @@ def main() -> None:
     for d in (INBOX_DIR, REPORTS_DIR, DONE_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
-    log.info(f"Watching {INBOX_DIR} for PDF files…")
-    log.info(f"Reports → {REPORTS_DIR}")
+    log.info(f"Слежу за папкой {INBOX_DIR}")
+    log.info(f"Отчёты → {REPORTS_DIR}")
 
-    # Process any PDFs already sitting in inbox (e.g. after restart)
     for pdf in sorted(INBOX_DIR.glob("*.pdf")):
-        if not pdf.name.startswith("._"):
+        if _is_pdf(pdf):
             process_pdf(pdf)
 
     observer = Observer()
     observer.schedule(PDFHandler(), str(INBOX_DIR), recursive=False)
     observer.start()
     try:
-        while True:
-            time.sleep(5)
+        while observer.is_alive():
+            observer.join(timeout=5)
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
