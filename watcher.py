@@ -13,6 +13,7 @@ import sys
 import time
 import logging
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,9 @@ from watchdog.events import FileSystemEventHandler, FileCreatedEvent
 from core.categorizer import categorize_all
 from core.db import insert_transactions
 from core.detector import detect_adapter
+
+_in_progress: set[str] = set()
+_lock = threading.Lock()
 
 BASE_DIR = Path(os.environ.get("FINANCE_DIR", Path.home() / "finance"))
 INBOX_DIR   = BASE_DIR / "inbox"
@@ -40,6 +44,11 @@ log = logging.getLogger(__name__)
 
 
 def process_pdf(pdf_path: Path) -> None:
+    with _lock:
+        if pdf_path.name in _in_progress:
+            return
+        _in_progress.add(pdf_path.name)
+
     log.info(f"Processing: {pdf_path.name}")
 
     try:
@@ -65,6 +74,9 @@ def process_pdf(pdf_path: Path) -> None:
 
     except Exception as e:
         log.error(f"  Failed to process {pdf_path.name}: {e}", exc_info=True)
+    finally:
+        with _lock:
+            _in_progress.discard(pdf_path.name)
 
 
 def _write_report(stem: str, df, bank: str) -> None:
@@ -127,7 +139,8 @@ def main() -> None:
 
     # Process any PDFs already sitting in inbox (e.g. after restart)
     for pdf in sorted(INBOX_DIR.glob("*.pdf")):
-        process_pdf(pdf)
+        if not pdf.name.startswith("._"):
+            process_pdf(pdf)
 
     observer = Observer()
     observer.schedule(PDFHandler(), str(INBOX_DIR), recursive=False)
