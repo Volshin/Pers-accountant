@@ -1,11 +1,16 @@
+import logging
 import os
 import re
 import json
 import requests
 
+log = logging.getLogger(__name__)
+
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_URL = f"{OLLAMA_HOST.rstrip('/')}/api/generate"
 MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b-instruct-q8_0")
+
+log.info(f"Ollama: {OLLAMA_URL} | model: {MODEL}")
 
 CATEGORIES = [
     "Продукты", "Ресторан", "Транспорт", "Быт", "Наличные",

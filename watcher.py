@@ -110,7 +110,7 @@ class PDFHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         path = Path(event.src_path)
-        if path.suffix.lower() != ".pdf":
+        if path.suffix.lower() != ".pdf" or path.name.startswith("._"):
             return
         # Brief wait — some apps write the file in chunks
         time.sleep(1)
