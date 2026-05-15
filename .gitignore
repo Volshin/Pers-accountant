@@ -1,0 +1,17 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Данные — не в репо
+*.pdf
+*.db
+*.db-shm
+*.db-wal
+*.csv
+finance/
+
+# Старые прототипы
+parser.py
+parser_to_llm.py
+diagnose.py

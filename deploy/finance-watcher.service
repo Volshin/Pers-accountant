@@ -1,0 +1,15 @@
+[Unit]
+Description=Personal Finance PDF Watcher
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/PersAccountant
+Environment=FINANCE_DIR=/home/pi/finance
+ExecStart=/home/pi/PersAccountant/venv/bin/python watcher.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

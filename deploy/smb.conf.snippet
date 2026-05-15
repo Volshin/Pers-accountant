@@ -1,0 +1,11 @@
+# Добавить в /etc/samba/smb.conf на Raspberry Pi
+# После: sudo systemctl restart smbd
+
+[finance]
+   comment = Personal Finance
+   path = /home/pi/finance
+   valid users = pi
+   browseable = yes
+   writable = yes
+   create mask = 0644
+   directory mask = 0755
