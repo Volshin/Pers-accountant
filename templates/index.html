@@ -371,12 +371,9 @@ async function rollbackImport(importId, btn) {
   btn.textContent = '…';
   await fetch(`/api/imports/${importId}`, {method: 'DELETE'});
   document.getElementById(`imp-${importId}`)?.remove();
-  // Refresh month list in case the rolled-back import was the only data for a month
-  const mr = await fetch('/api/months');
-  S.months = await mr.json();
-  if (S.idx >= S.months.length) S.idx = 0;
-  updateNav();
-  if (S.months.length) loadSummary();
+  // init() handles both empty and non-empty months correctly (including updateNav)
+  S.idx = 0;
+  await init();
 }
 
 init();

@@ -32,7 +32,6 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_date      ON transactions(date);
             CREATE INDEX IF NOT EXISTS idx_category  ON transactions(category);
             CREATE INDEX IF NOT EXISTS idx_bank      ON transactions(bank);
-            CREATE INDEX IF NOT EXISTS idx_import_id ON transactions(import_id);
 
             CREATE TABLE IF NOT EXISTS imports (
                 import_id   TEXT PRIMARY KEY,
@@ -43,11 +42,13 @@ def init_db() -> None:
             );
             """
         )
-    # Migrate existing databases that don't have import_id yet
+    # Migrate existing databases that don't have import_id yet,
+    # then create index (must happen after column exists).
     with _connect() as conn:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
         if "import_id" not in cols:
             conn.execute("ALTER TABLE transactions ADD COLUMN import_id TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_import_id ON transactions(import_id)")
 
 
 def _fingerprint(row: dict) -> str:
