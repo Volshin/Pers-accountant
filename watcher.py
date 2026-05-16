@@ -80,8 +80,11 @@ def process_pdf(pdf_path: Path) -> None:
         log.info(f"Отчёт:      {report_path.name}")
         _log_summary(df)
 
-        shutil.move(str(pdf_path), str(DONE_DIR / pdf_path.name))
-        log.info(f"Файл перемещён в done/")
+        try:
+            shutil.move(str(pdf_path), str(DONE_DIR / pdf_path.name))
+            log.info("Файл перемещён в done/")
+        except FileNotFoundError:
+            log.warning("Файл уже отсутствует в inbox — перемещение пропущено")
 
     except Exception as e:
         log.error(f"Ошибка: {e}", exc_info=True)
