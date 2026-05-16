@@ -4,6 +4,7 @@ Bank 2 adapter — slash-date format with separate Credit/Debit columns:
   DD/MM/YYYY   DD/MM/YYYY         EUR              [amt]   [amt]   <text>
 """
 import re
+from datetime import datetime
 import pdfplumber
 import pandas as pd
 from .base import BankAdapter
@@ -50,6 +51,10 @@ class Bank2Adapter(BankAdapter):
         return pd.DataFrame(records)
 
     @staticmethod
+    def _fmt(d: str) -> str:
+        return datetime.strptime(d, "%d/%m/%Y").strftime("%Y-%m-%d")
+
+    @staticmethod
     def _parse_page_by_coords(
         words: list[dict], credit_x: float, debit_x: float
     ) -> list[dict]:
@@ -92,8 +97,8 @@ class Bank2Adapter(BankAdapter):
 
             records.append(
                 {
-                    "date":        value_date,
-                    "tx_date":     tx_date,
+                    "date":        self._fmt(value_date),
+                    "tx_date":     self._fmt(tx_date),
                     "currency":    currency,
                     "amount":      credit - debit,   # positive = income, negative = expense
                     "description": " ".join(desc_words),
@@ -115,8 +120,8 @@ class Bank2Adapter(BankAdapter):
             if m:
                 records.append(
                     {
-                        "date":        m.group(1),
-                        "tx_date":     m.group(2),
+                        "date":        datetime.strptime(m.group(1), "%d/%m/%Y").strftime("%Y-%m-%d"),
+                        "tx_date":     datetime.strptime(m.group(2), "%d/%m/%Y").strftime("%Y-%m-%d"),
                         "currency":    m.group(3),
                         "amount":      -float(m.group(4).replace(",", "")),
                         "description": m.group(5).strip(),

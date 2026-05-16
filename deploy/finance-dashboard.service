@@ -1,0 +1,14 @@
+[Unit]
+Description=Personal Finance Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=volshin
+WorkingDirectory=/home/volshin/PersAccountant
+ExecStart=/home/volshin/PersAccountant/venv/bin/python dashboard.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

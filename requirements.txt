@@ -2,3 +2,4 @@ pdfplumber
 pandas
 requests
 watchdog
+flask

@@ -3,6 +3,7 @@ Bank 1 adapter — Alta bank (Serbian), format:
   <num> <DD.MM.YYYY> <DD.MM.YYYY> <description> <-amount> <balance> <DD.MM.YYYY> <ref>
 """
 import re
+from datetime import datetime
 import pdfplumber
 import pandas as pd
 from .base import BankAdapter
@@ -75,23 +76,25 @@ class Bank1Adapter(BankAdapter):
         return merged
 
     @staticmethod
-    def _parse_line(line: str) -> dict | None:
+    def _fmt(d: str) -> str:
+        return datetime.strptime(d, "%d.%m.%Y").strftime("%Y-%m-%d")
+
+    def _parse_line(self, line: str) -> dict | None:
         m = _PATTERN.match(line)
         if m:
             return {
-                "date":        m.group(2),
-                "tx_date":     m.group(7),
+                "date":        self._fmt(m.group(2)),
+                "tx_date":     self._fmt(m.group(7)),
                 "currency":    "RSD",
                 "amount":      float(m.group(5).replace(",", "")),
                 "description": m.group(4).strip(),
                 "bank":        BANK_NAME,
             }
-        # Try income pattern — amount is positive, so check it doesn't match expense
         m2 = _PATTERN_IN.match(line)
         if m2 and not _EXPENSE_ONLY_RE.search(m2.group(5)):
             return {
-                "date":        m2.group(2),
-                "tx_date":     m2.group(7),
+                "date":        self._fmt(m2.group(2)),
+                "tx_date":     self._fmt(m2.group(7)),
                 "currency":    "RSD",
                 "amount":      float(m2.group(5).replace(",", "")),
                 "description": m2.group(4).strip(),

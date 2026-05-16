@@ -111,6 +111,59 @@ def load_transactions(
         return pd.read_sql_query(query, conn, params=params)
 
 
+def get_months() -> list[str]:
+    """Return distinct YYYY-MM values that have transactions, newest first."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT substr(date, 1, 7) as m FROM transactions ORDER BY m DESC"
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def get_monthly_summary(month: str) -> dict:
+    """Return expense and income totals grouped by category for a given YYYY-MM."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT category, currency, SUM(amount) as total, COUNT(*) as cnt
+            FROM transactions
+            WHERE substr(date, 1, 7) = ?
+            GROUP BY category, currency
+            ORDER BY total ASC
+            """,
+            (month,),
+        ).fetchall()
+
+    expenses, income = [], []
+    for cat, cur, total, cnt in rows:
+        item = {"category": cat or "Прочее", "currency": cur, "total": round(total, 2), "count": cnt}
+        (expenses if total < 0 else income).append(item)
+
+    return {"expenses": expenses, "income": income}
+
+
+def get_transactions_by_category(month: str, category: str) -> list[dict]:
+    """Return transactions for a given month and category, newest first."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT date, tx_date, description, amount, currency, bank
+            FROM transactions
+            WHERE substr(date, 1, 7) = ? AND COALESCE(category, 'Прочее') = ?
+            ORDER BY date DESC
+            """,
+            (month, category),
+        ).fetchall()
+    return [
+        {"date": r[0], "tx_date": r[1], "description": r[2],
+         "amount": r[3], "currency": r[4], "bank": r[5]}
+        for r in rows
+    ]
+
+
 def update_categories(df: pd.DataFrame) -> None:
     """Persist LLM-assigned categories back to the DB by fingerprint."""
     with _connect() as conn:
