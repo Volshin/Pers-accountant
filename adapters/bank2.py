@@ -14,6 +14,10 @@ _DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 _AMOUNT_RE = re.compile(r"^[\d,]+\.\d{2}$")
 
 
+def _fmt(d: str) -> str:
+    return datetime.strptime(d, "%d/%m/%Y").strftime("%Y-%m-%d")
+
+
 class Bank2Adapter(BankAdapter):
     bank_name = BANK_NAME
 
@@ -49,10 +53,6 @@ class Bank2Adapter(BankAdapter):
                 records.extend(self._parse_page_by_coords(words, credit_x, debit_x))
 
         return pd.DataFrame(records)
-
-    @staticmethod
-    def _fmt(d: str) -> str:
-        return datetime.strptime(d, "%d/%m/%Y").strftime("%Y-%m-%d")
 
     @staticmethod
     def _parse_page_by_coords(
@@ -97,8 +97,8 @@ class Bank2Adapter(BankAdapter):
 
             records.append(
                 {
-                    "date":        self._fmt(value_date),
-                    "tx_date":     self._fmt(tx_date),
+                    "date":        _fmt(value_date),
+                    "tx_date":     _fmt(tx_date),
                     "currency":    currency,
                     "amount":      credit - debit,   # positive = income, negative = expense
                     "description": " ".join(desc_words),

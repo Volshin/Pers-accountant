@@ -185,25 +185,6 @@ async function loadSummary() {
   render(await r.json());
 }
 
-function render({expenses, income}) {
-  S.expenses = expenses;
-
-  // Stat cards
-  document.getElementById('total-expense').innerHTML = totalHtml(expenses, true)  || '<span style="color:var(--muted)">—</span>';
-  document.getElementById('total-income').innerHTML  = totalHtml(income,   false) || '<span style="color:var(--muted)">—</span>';
-
-  // Chart
-  const chartCard = document.getElementById('chart-card');
-  if (expenses.length) { chartCard.style.display='flex'; drawChart(expenses); }
-  else                 { chartCard.style.display='none'; }
-
-  // Lists
-  let html = '';
-  if (expenses.length) html += section('Расходы', expenses, true);
-  if (income.length)   html += section('Доходы',  income,  false);
-  document.getElementById('lists').innerHTML = html;
-}
-
 function totalHtml(items, isExp) {
   const byCur = {};
   items.forEach(i => byCur[i.currency] = (byCur[i.currency]||0) + i.total);
@@ -259,9 +240,8 @@ function section(title, items, isExp) {
   return `<div class="section-title">${title}</div><div class="category-list">${rows.join('')}</div>`;
 }
 
-// Store income separately for click handler
 let _income = [];
-function render({expenses, income}) { // shadows outer — reassign below
+function render({expenses, income}) {
   _income = income;
   S.expenses = expenses;
   document.getElementById('total-expense').innerHTML = totalHtml(expenses, true)  || '<span style="color:var(--muted)">—</span>';
