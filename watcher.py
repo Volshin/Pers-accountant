@@ -80,11 +80,20 @@ def process_pdf(pdf_path: Path) -> None:
         log.info(f"Отчёт:      {report_path.name}")
         _log_summary(df)
 
+        dest = DONE_DIR / pdf_path.name
         try:
-            shutil.move(str(pdf_path), str(DONE_DIR / pdf_path.name))
+            shutil.move(str(pdf_path), str(dest))
             log.info("Файл перемещён в done/")
         except FileNotFoundError:
-            log.warning("Файл уже отсутствует в inbox — перемещение пропущено")
+            log.warning("Файл не найден при перемещении — пропущено")
+        except OSError:
+            # Cross-device or Samba lock: copy + delete
+            try:
+                shutil.copy2(str(pdf_path), str(dest))
+                pdf_path.unlink()
+                log.info("Файл скопирован в done/ и удалён из inbox")
+            except OSError as e:
+                log.warning(f"Не удалось переместить файл: {e}")
 
     except Exception as e:
         log.error(f"Ошибка: {e}", exc_info=True)

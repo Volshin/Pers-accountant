@@ -17,9 +17,9 @@ _DATE_RE     = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
 _AMOUNT_RE   = re.compile(r"^\d[\d,]*\.\d{2}$")
 _IBAN_RE     = re.compile(r"^KZ[A-Z0-9]{10,}$")
 _TX_DATE_RE  = re.compile(r"Дата транзакции:\s*(\d{2}\.\d{2}\.\d{4})")
-_OPERACIA_RE   = re.compile(r"Операция:\s*(.+?)(?=\s+Дата транзакции:|\s+Код авторизации:|$)")
-_PURCHASE_RE   = re.compile(r"^Покупка с нашей карты в чужом устройстве\s*\\?(.*)", re.DOTALL)
-_VYPLATA_RE    = re.compile(r"Выплата вклада с депозитного договора")
+_OPERACIA_RE    = re.compile(r"Операция:\s*(.+?)(?=\s+Дата транзакции:|\s+Код авторизации:|\s+Выплата вклада|\s+вклада по договору|$)")
+_DEPOSIT_RE     = re.compile(r"Выплата вклада|Transfer of own funds вклада")
+_REAL_CREDIT_RE = re.compile(r"Возврат покупки")
 _CURRENCY_RE = re.compile(r"Валюта:\s*([A-Z]{3})")
 
 
@@ -190,20 +190,23 @@ def _parse_page(
         if m:
             description = m.group(1).strip()
         else:
-            fallback = re.split(r"\s+(?:Дата транзакции:|Выплата вклада)", desc_raw)[0].strip()
+            fallback = re.split(r"\s+Дата транзакции:", desc_raw)[0].strip()
             description = fallback[:200] or "—"
 
-        # Drop internal deposit-payout bookkeeping entries
-        if _VYPLATA_RE.search(description):
-            continue
+        # Drop internal deposit-related credits; protect real refunds (Возврат покупки)
+        if kd["credit"] > 0 and kd["debit"] == 0:
+            if _DEPOSIT_RE.search(desc_raw) and not _REAL_CREDIT_RE.search(desc_raw):
+                continue
 
-        # For card purchases extract the merchant from the backslash path
-        m2 = _PURCHASE_RE.match(description)
-        if m2:
-            tail = m2.group(1).strip()
+        # Extract merchant name from backslash-delimited POS path
+        if "\\" in description:
+            parts = [p.strip() for p in description.split("\\") if p.strip()]
+            if parts:
+                description = parts[-1]
+        elif description.startswith("Покупка с нашей карты в чужом устройстве"):
+            tail = description[len("Покупка с нашей карты в чужом устройстве"):].strip()
             if tail:
-                parts = [p.strip() for p in tail.split("\\") if p.strip()]
-                description = parts[-1] if parts else tail
+                description = tail
 
         records.append({
             "date":        _fmt(kd["date"]),
