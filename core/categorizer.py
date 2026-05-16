@@ -3,6 +3,7 @@ import os
 import re
 import json
 import requests
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -12,12 +13,13 @@ MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b-instruct-q8_0")
 
 log.info(f"Ollama: {OLLAMA_URL} | model: {MODEL}")
 
-CATEGORIES = [
-    "Продукты", "Ресторан", "Транспорт", "Быт", "Наличные",
-    "Перевод", "Одежда", "Здоровье", "Подписки", "Прочее",
-]
+_CATEGORIES_FILE = Path(__file__).parent.parent / "config" / "categories.json"
 
-BATCH_SIZE = 50  # transactions per LLM call
+def _load_categories() -> list[dict]:
+    with open(_CATEGORIES_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+BATCH_SIZE = 50
 
 
 def categorize_all(descriptions: list[str]) -> list[str]:
@@ -30,12 +32,15 @@ def categorize_all(descriptions: list[str]) -> list[str]:
 
 def _categorize_batch(descriptions: list[str]) -> list[str]:
     numbered = "\n".join(f"{i + 1}. {d}" for i, d in enumerate(descriptions))
-    cats = ", ".join(CATEGORIES)
+    categories = _load_categories()
+    names = ", ".join(c["name"] for c in categories)
+    cat_lines = "\n".join(f'- {c["name"]}: {c["hint"]}' for c in categories)
     prompt = (
-        f"Категоризируй банковские транзакции на русском языке.\n"
-        f"Используй только эти категории: {cats}.\n"
-        f"Верни ТОЛЬКО JSON массив объектов с полями id и category.\n"
-        f"Никаких пояснений, только JSON.\n\n"
+        f"Определи категорию каждой банковской транзакции по названию торговой точки или описанию платежа.\n"
+        f"Названия могут быть на любом языке — определяй по смыслу.\n\n"
+        f"Категории:\n{cat_lines}\n\n"
+        f"Используй только эти категории: {names}.\n"
+        f"Верни ТОЛЬКО JSON массив: [{{\"id\": 1, \"category\": \"...\"}}, ...]\n\n"
         f"Транзакции:\n{numbered}"
     )
 
