@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import re
 from flask import Flask, jsonify, render_template, abort
-from core.db import get_months, get_monthly_summary, get_transactions_by_category
+from core.db import (
+    get_months, get_monthly_summary, get_transactions_by_category,
+    get_imports, rollback_import,
+)
 
 app = Flask(__name__)
 
@@ -30,6 +33,17 @@ def api_transactions(month, category):
     if not _MONTH_RE.match(month):
         abort(400)
     return jsonify(get_transactions_by_category(month, category))
+
+
+@app.route("/api/imports")
+def api_imports():
+    return jsonify(get_imports())
+
+
+@app.route("/api/imports/<import_id>", methods=["DELETE"])
+def api_rollback(import_id):
+    deleted = rollback_import(import_id)
+    return jsonify({"deleted": deleted})
 
 
 if __name__ == "__main__":

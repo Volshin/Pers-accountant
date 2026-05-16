@@ -94,6 +94,18 @@ header h1{font-size:16px;font-weight:700;letter-spacing:.5px}
 .bank-badge{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;background:#f3f4f6;color:var(--muted);padding:2px 8px;border-radius:10px}
 
 .empty{text-align:center;padding:60px 20px;color:var(--muted);font-size:15px;line-height:1.6}
+
+/* ── IMPORTS VIEW ── */
+.imports-link{display:block;width:100%;background:none;border:none;color:var(--muted);font-size:13px;padding:20px 4px 8px;cursor:pointer;text-align:center}
+.imports-link:hover{color:var(--primary)}
+.import-row{background:var(--card);border-radius:var(--radius);padding:13px 14px;box-shadow:var(--shadow);display:flex;align-items:center;gap:10px}
+.import-info{flex:1;min-width:0}
+.import-file{font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.import-meta{font-size:12px;color:var(--muted);margin-top:3px}
+.import-count{font-size:13px;font-weight:700;color:var(--muted);flex-shrink:0;text-align:right;min-width:44px}
+.rollback-btn{background:#fee2e2;color:var(--expense);border:none;border-radius:10px;font-size:12px;font-weight:700;padding:7px 12px;cursor:pointer;flex-shrink:0;white-space:nowrap;transition:background .2s,color .2s}
+.rollback-btn.confirming{background:var(--expense);color:#fff}
+.rollback-btn:disabled{opacity:.4;cursor:default}
 </style>
 </head>
 <body>
@@ -131,6 +143,14 @@ header h1{font-size:16px;font-weight:700;letter-spacing:.5px}
       </div>
     </div>
     <div id="lists"></div>
+    <button class="imports-link" onclick="showImports()">История импортов ›</button>
+  </div>
+
+  <!-- Imports view -->
+  <div id="imports-view" style="display:none">
+    <button class="tx-back" onclick="backFromImports()">‹ Назад</button>
+    <div class="section-title">История импортов</div>
+    <div class="category-list" id="imports-list"></div>
   </div>
 
   <!-- Transactions view -->
@@ -298,6 +318,65 @@ async function showCategory(item, colorIdx) {
 function backToSummary() {
   document.getElementById('tx-view').style.display      = 'none';
   document.getElementById('summary-view').style.display = 'block';
+}
+
+async function showImports() {
+  document.getElementById('summary-view').style.display = 'none';
+  document.getElementById('tx-view').style.display      = 'none';
+  document.getElementById('imports-view').style.display = 'block';
+  window.scrollTo(0, 0);
+  await loadImports();
+}
+
+function backFromImports() {
+  document.getElementById('imports-view').style.display = 'none';
+  document.getElementById('summary-view').style.display = 'block';
+}
+
+async function loadImports() {
+  const r = await fetch('/api/imports');
+  const imports = await r.json();
+  const el = document.getElementById('imports-list');
+  if (!imports.length) {
+    el.innerHTML = '<div class="empty">Импортов ещё нет.</div>';
+    return;
+  }
+  el.innerHTML = imports.map(imp => {
+    const dt = (imp.imported_at || '').slice(0, 16).replace('T', ' ');
+    return `
+    <div class="import-row" id="imp-${imp.import_id}">
+      <div class="import-info">
+        <div class="import-file" title="${imp.filename}">${imp.filename}</div>
+        <div class="import-meta">${dt} · ${imp.bank || '—'}</div>
+      </div>
+      <div class="import-count">${imp.inserted} тр.</div>
+      <button class="rollback-btn" onclick="rollbackImport('${imp.import_id}',this)">Откатить</button>
+    </div>`;
+  }).join('');
+}
+
+async function rollbackImport(importId, btn) {
+  if (!btn.dataset.confirming) {
+    btn.dataset.confirming = '1';
+    btn.classList.add('confirming');
+    btn.textContent = 'Точно?';
+    setTimeout(() => {
+      btn.dataset.confirming = '';
+      btn.classList.remove('confirming');
+      btn.textContent = 'Откатить';
+    }, 3000);
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '…';
+  await fetch(`/api/imports/${importId}`, {method: 'DELETE'});
+  document.getElementById(`imp-${importId}`)?.remove();
+  // Refresh month list in case the rolled-back import was the only data for a month
+  const mr = await fetch('/api/months');
+  S.months = await mr.json();
+  if (S.idx >= S.months.length) S.idx = 0;
+  updateNav();
+  if (S.months.length) loadSummary();
 }
 
 init();

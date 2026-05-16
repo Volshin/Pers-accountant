@@ -15,12 +15,13 @@ import shutil
 import threading
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from core.categorizer import categorize_all
-from core.db import insert_transactions
+from core.db import insert_transactions, record_import
 from core.detector import detect_adapter
 
 BASE_DIR    = Path(os.environ.get("FINANCE_DIR", Path.home() / "finance"))
@@ -68,8 +69,12 @@ def process_pdf(pdf_path: Path) -> None:
         log.info("Категоризирую через Ollama…")
         df["category"] = categorize_all(df["description"].tolist())
 
-        inserted, skipped = insert_transactions(df)
+        import_id = str(uuid4())
+        inserted, skipped = insert_transactions(df, import_id)
         log.info(f"Сохранено:  {inserted} новых, {skipped} дублей пропущено")
+        if inserted > 0:
+            record_import(import_id, pdf_path.name, adapter.bank_name, inserted)
+            log.info(f"Import ID:  {import_id}")
 
         report_path = _write_report(pdf_path.stem, df, adapter.bank_name)
         log.info(f"Отчёт:      {report_path.name}")

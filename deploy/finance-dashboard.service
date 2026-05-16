@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=volshin
 WorkingDirectory=/home/volshin/PersAccountant
+EnvironmentFile=/home/volshin/PersAccountant/.env
 ExecStart=/home/volshin/PersAccountant/venv/bin/python dashboard.py
 Restart=on-failure
 RestartSec=10

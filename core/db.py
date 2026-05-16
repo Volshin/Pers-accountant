@@ -19,6 +19,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS transactions (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 fingerprint TEXT    UNIQUE NOT NULL,
+                import_id   TEXT,
                 date        TEXT    NOT NULL,
                 tx_date     TEXT,
                 currency    TEXT    NOT NULL DEFAULT 'EUR',
@@ -28,11 +29,25 @@ def init_db() -> None:
                 bank        TEXT,
                 imported_at TEXT    DEFAULT (datetime('now'))
             );
-            CREATE INDEX IF NOT EXISTS idx_date     ON transactions(date);
-            CREATE INDEX IF NOT EXISTS idx_category ON transactions(category);
-            CREATE INDEX IF NOT EXISTS idx_bank     ON transactions(bank);
+            CREATE INDEX IF NOT EXISTS idx_date      ON transactions(date);
+            CREATE INDEX IF NOT EXISTS idx_category  ON transactions(category);
+            CREATE INDEX IF NOT EXISTS idx_bank      ON transactions(bank);
+            CREATE INDEX IF NOT EXISTS idx_import_id ON transactions(import_id);
+
+            CREATE TABLE IF NOT EXISTS imports (
+                import_id   TEXT PRIMARY KEY,
+                filename    TEXT NOT NULL,
+                bank        TEXT,
+                inserted    INTEGER NOT NULL DEFAULT 0,
+                imported_at TEXT    DEFAULT (datetime('now'))
+            );
             """
         )
+    # Migrate existing databases that don't have import_id yet
+    with _connect() as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
+        if "import_id" not in cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN import_id TEXT")
 
 
 def _fingerprint(row: dict) -> str:
@@ -49,10 +64,8 @@ def _fingerprint(row: dict) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def insert_transactions(df: pd.DataFrame) -> tuple[int, int]:
-    """Insert new transactions, skip duplicates.
-    Returns (inserted, skipped).
-    """
+def insert_transactions(df: pd.DataFrame, import_id: str) -> tuple[int, int]:
+    """Insert new transactions, skip duplicates. Returns (inserted, skipped)."""
     init_db()
     inserted = skipped = 0
 
@@ -63,11 +76,12 @@ def insert_transactions(df: pd.DataFrame) -> tuple[int, int]:
                 conn.execute(
                     """
                     INSERT INTO transactions
-                        (fingerprint, date, tx_date, currency, amount, description, category, bank)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (fingerprint, import_id, date, tx_date, currency, amount, description, category, bank)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         fp,
+                        import_id,
                         row.get("date"),
                         row.get("tx_date"),
                         row.get("currency", "EUR"),
@@ -82,6 +96,42 @@ def insert_transactions(df: pd.DataFrame) -> tuple[int, int]:
                 skipped += 1
 
     return inserted, skipped
+
+
+def record_import(import_id: str, filename: str, bank: str, inserted: int) -> None:
+    """Write a row to the imports log table."""
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO imports (import_id, filename, bank, inserted) VALUES (?, ?, ?, ?)",
+            (import_id, filename, bank, inserted),
+        )
+
+
+def get_imports() -> list[dict]:
+    """Return import history, newest first."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT import_id, filename, bank, inserted, imported_at FROM imports ORDER BY imported_at DESC"
+        ).fetchall()
+    return [
+        {"import_id": r[0], "filename": r[1], "bank": r[2],
+         "inserted": r[3], "imported_at": r[4]}
+        for r in rows
+    ]
+
+
+def rollback_import(import_id: str) -> int:
+    """Delete all transactions for this import_id. Returns count of deleted rows."""
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM transactions WHERE import_id = ?", (import_id,)
+        )
+        deleted = cur.rowcount
+        conn.execute("DELETE FROM imports WHERE import_id = ?", (import_id,))
+    return deleted
 
 
 def load_transactions(

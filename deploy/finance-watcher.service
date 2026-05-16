@@ -4,10 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/PersAccountant
-Environment=FINANCE_DIR=/home/pi/finance
-ExecStart=/home/pi/PersAccountant/venv/bin/python watcher.py
+User=volshin
+WorkingDirectory=/home/volshin/PersAccountant
+EnvironmentFile=/home/volshin/PersAccountant/.env
+ExecStart=/home/volshin/PersAccountant/venv/bin/python watcher.py
 Restart=on-failure
 RestartSec=10
 

@@ -9,11 +9,12 @@ Usage:
 """
 import argparse
 import sys
+from uuid import uuid4
 
 import pandas as pd
 
 from core.categorizer import categorize_all
-from core.db import insert_transactions, load_transactions, update_categories
+from core.db import insert_transactions, record_import, load_transactions, update_categories
 from core.detector import detect_adapter
 
 
@@ -30,8 +31,12 @@ def import_pdf(path: str) -> None:
     print(f"[{path}] Parsed {len(df)} transactions. Categorizing…")
     df["category"] = categorize_all(df["description"].tolist())
 
-    inserted, skipped = insert_transactions(df)
+    import_id = str(uuid4())
+    inserted, skipped = insert_transactions(df, import_id)
     print(f"[{path}] Saved {inserted} new, skipped {skipped} duplicates.")
+    if inserted > 0:
+        record_import(import_id, path, adapter.bank_name, inserted)
+        print(f"[{path}] Import ID: {import_id}")
 
 
 def print_summary(
