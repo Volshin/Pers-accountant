@@ -2,8 +2,9 @@ import pdfplumber
 from adapters.base import BankAdapter
 from adapters.bank1 import Bank1Adapter
 from adapters.bank2 import Bank2Adapter
+from adapters.bank3 import Bank3Adapter
 
-ADAPTERS: list[type[BankAdapter]] = [Bank1Adapter, Bank2Adapter]
+ADAPTERS: list[type[BankAdapter]] = [Bank1Adapter, Bank2Adapter, Bank3Adapter]
 
 
 def detect_adapter(pdf_path: str) -> BankAdapter:
