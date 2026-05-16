@@ -4,7 +4,7 @@ from adapters.bank1 import Bank1Adapter
 from adapters.bank2 import Bank2Adapter
 from adapters.bank3 import Bank3Adapter
 
-ADAPTERS: list[type[BankAdapter]] = [Bank1Adapter, Bank2Adapter, Bank3Adapter]
+ADAPTERS: list[type[BankAdapter]] = [Bank3Adapter, Bank2Adapter, Bank1Adapter]
 
 
 def detect_adapter(pdf_path: str) -> BankAdapter:
