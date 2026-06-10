@@ -5,7 +5,7 @@ from core.db import (
     get_months, get_monthly_summary, get_transactions_by_category,
     get_imports, rollback_import,
     get_all_exchange_rates, get_exchange_rates, set_exchange_rate, delete_exchange_rate,
-    get_merchant_rules, set_merchant_rule, delete_merchant_rule,
+    get_merchant_rules, set_merchant_rule, delete_merchant_rule, apply_merchant_rule_to_existing,
     update_transaction_category, get_currencies,
 )
 from pathlib import Path
@@ -45,6 +45,22 @@ def api_currencies():
 @app.route("/api/categories")
 def api_categories():
     return jsonify([c["name"] for c in _load_categories()])
+
+
+@app.route("/api/categories", methods=["POST"])
+def api_categories_add():
+    data = request.get_json(force=True) or {}
+    name = data.get("name", "").strip()
+    hint = data.get("hint", "").strip()
+    if not name:
+        abort(400)
+    cats = _load_categories()
+    if any(c["name"] == name for c in cats):
+        return jsonify({"ok": True, "created": False})
+    cats.append({"name": name, "hint": hint or name.lower()})
+    with open(_CATEGORIES_FILE, "w", encoding="utf-8") as f:
+        json.dump(cats, f, ensure_ascii=False, indent=2)
+    return jsonify({"ok": True, "created": True})
 
 
 @app.route("/api/summary/<month>")
@@ -140,7 +156,8 @@ def api_merchant_rules_set():
     if not merchant or not category:
         abort(400)
     set_merchant_rule(merchant, category)
-    return jsonify({"ok": True})
+    updated = apply_merchant_rule_to_existing(merchant, category)
+    return jsonify({"ok": True, "updated": updated})
 
 
 @app.route("/api/merchant-rules/<path:merchant>", methods=["DELETE"])

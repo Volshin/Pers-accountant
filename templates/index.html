@@ -204,7 +204,8 @@ header h1{font-size:15px;font-weight:700;letter-spacing:.5px;white-space:nowrap}
   <div class="dialog-box">
     <div class="dialog-title">Изменить категорию</div>
     <div class="dialog-sub" id="dialog-desc">—</div>
-    <select class="dialog-select" id="dialog-cat-select"></select>
+    <input class="dialog-select" id="dialog-cat-input" list="dialog-cat-list" placeholder="Выберите или введите категорию…" autocomplete="off">
+    <datalist id="dialog-cat-list"></datalist>
     <div class="dialog-actions">
       <button class="dialog-btn dialog-btn-one" onclick="confirmCatChange(false)">Только эту</button>
       <button class="dialog-btn dialog-btn-all" onclick="confirmCatChange(true)">Все транзакции<br>этого мерчанта</button>
@@ -480,12 +481,13 @@ function openCatDialog(txId, description, currentCategory) {
   _editTx = {id: txId, description, currentCategory};
   document.getElementById('dialog-desc').textContent = description || '—';
 
-  const sel = document.getElementById('dialog-cat-select');
-  sel.innerHTML = S.categories.map(c =>
-    `<option value="${escHtml(c)}" ${c === currentCategory ? 'selected' : ''}>${escHtml(c)}</option>`
-  ).join('');
+  const inp = document.getElementById('dialog-cat-input');
+  inp.value = currentCategory || '';
+  const dl = document.getElementById('dialog-cat-list');
+  dl.innerHTML = S.categories.map(c => `<option value="${escHtml(c)}">`).join('');
 
   document.getElementById('cat-dialog').classList.add('open');
+  setTimeout(() => inp.focus(), 80);
 }
 
 function closeCatDialog(evt) {
@@ -496,26 +498,43 @@ function closeCatDialog(evt) {
 
 async function confirmCatChange(applyToAll) {
   if (!_editTx) return;
-  const newCat = document.getElementById('dialog-cat-select').value;
+  const newCat = document.getElementById('dialog-cat-input').value.trim();
+  if (!newCat) return;
   document.getElementById('cat-dialog').classList.remove('open');
 
-  await fetch(`/api/transaction/${_editTx.id}/category`, {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({category: newCat}),
-  });
+  // If new category, persist it to categories.json
+  if (!S.categories.includes(newCat)) {
+    await fetch('/api/categories', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: newCat}),
+    });
+    S.categories.push(newCat);
+  }
 
   if (applyToAll) {
+    // Saves rule + bulk-updates all existing transactions with this description
     await fetch('/api/merchant-rules', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({merchant: _editTx.description, category: newCat}),
     });
+    // Update all visible badges with the same description
+    document.querySelectorAll('.tx-row').forEach(row => {
+      const desc = row.querySelector('.tx-desc')?.title;
+      if (desc === _editTx.description) {
+        row.querySelector('.cat-badge').textContent = newCat;
+      }
+    });
+  } else {
+    await fetch(`/api/transaction/${_editTx.id}/category`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({category: newCat}),
+    });
+    const badge = document.getElementById(`catbadge-${_editTx.id}`);
+    if (badge) badge.textContent = newCat;
   }
-
-  // Update badge in the list without reloading
-  const badge = document.getElementById(`catbadge-${_editTx.id}`);
-  if (badge) badge.textContent = newCat;
 
   _editTx = null;
 }

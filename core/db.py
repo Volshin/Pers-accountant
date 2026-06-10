@@ -193,11 +193,19 @@ def get_currencies() -> list[str]:
 # ── Exchange rates ─────────────────────────────────────────────────────────────
 
 def get_exchange_rates(month: str) -> dict[str, float]:
-    """Return {currency: rate_to_eur} for the given YYYY-MM."""
+    """Return most recent {currency: rate_to_eur} available on or before month."""
     init_db()
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT currency, rate_to_eur FROM exchange_rates WHERE month = ?", (month,)
+            """
+            SELECT e1.currency, e1.rate_to_eur
+            FROM exchange_rates e1
+            WHERE e1.month = (
+                SELECT MAX(e2.month) FROM exchange_rates e2
+                WHERE e2.currency = e1.currency AND e2.month <= ?
+            )
+            """,
+            (month,),
         ).fetchall()
     return {r[0]: r[1] for r in rows}
 
@@ -253,6 +261,17 @@ def delete_merchant_rule(merchant: str) -> None:
     init_db()
     with _connect() as conn:
         conn.execute("DELETE FROM merchant_rules WHERE merchant = ?", (merchant,))
+
+
+def apply_merchant_rule_to_existing(merchant: str, category: str) -> int:
+    """Update category for all existing transactions with this description. Returns count."""
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE transactions SET category = ? WHERE description = ?",
+            (category, merchant),
+        )
+    return cur.rowcount
 
 
 # ── Transaction category update ────────────────────────────────────────────────

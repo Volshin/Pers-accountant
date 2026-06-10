@@ -51,10 +51,7 @@ class Bank4Adapter(BankAdapter):
     @classmethod
     def can_handle(cls, first_page_text: str) -> bool:
         t = first_page_text.upper()
-        # "POŠTANSKA" covers both Latin (Š→Š) and may appear as ASCII variant
-        has_bank = "POŠTANSKA" in t or "ПОШТАНСКА" in t
-        has_cols = "PROMENA" in t and "SALDO" in t
-        return has_bank or has_cols
+        return "POŠTANSKA" in t or "ПОШТАНСКА" in t
 
     def parse(self, pdf_path: str) -> pd.DataFrame:
         currency = _detect_currency(pdf_path)
