@@ -40,10 +40,22 @@ def init_db() -> None:
                 inserted    INTEGER NOT NULL DEFAULT 0,
                 imported_at TEXT    DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS exchange_rates (
+                month       TEXT NOT NULL,
+                currency    TEXT NOT NULL,
+                rate_to_eur REAL NOT NULL,
+                updated_at  TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (month, currency)
+            );
+
+            CREATE TABLE IF NOT EXISTS merchant_rules (
+                merchant    TEXT PRIMARY KEY,
+                category    TEXT NOT NULL,
+                updated_at  TEXT DEFAULT (datetime('now'))
+            );
             """
         )
-    # Migrate existing databases that don't have import_id yet,
-    # then create index (must happen after column exists).
     with _connect() as conn:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()]
         if "import_id" not in cols:
@@ -100,7 +112,6 @@ def insert_transactions(df: pd.DataFrame, import_id: str) -> tuple[int, int]:
 
 
 def record_import(import_id: str, filename: str, bank: str, inserted: int) -> None:
-    """Write a row to the imports log table."""
     init_db()
     with _connect() as conn:
         conn.execute(
@@ -110,7 +121,6 @@ def record_import(import_id: str, filename: str, bank: str, inserted: int) -> No
 
 
 def get_imports() -> list[dict]:
-    """Return import history, newest first."""
     init_db()
     with _connect() as conn:
         rows = conn.execute(
@@ -124,7 +134,6 @@ def get_imports() -> list[dict]:
 
 
 def rollback_import(import_id: str) -> int:
-    """Delete all transactions for this import_id. Returns count of deleted rows."""
     init_db()
     with _connect() as conn:
         cur = conn.execute(
@@ -163,7 +172,6 @@ def load_transactions(
 
 
 def get_months() -> list[str]:
-    """Return distinct YYYY-MM values that have transactions, newest first."""
     init_db()
     with _connect() as conn:
         rows = conn.execute(
@@ -172,36 +180,168 @@ def get_months() -> list[str]:
     return [r[0] for r in rows]
 
 
-def get_monthly_summary(month: str) -> dict:
-    """Return expense and income totals grouped by category for a given YYYY-MM."""
+def get_currencies() -> list[str]:
+    """Return distinct currencies present in transactions."""
     init_db()
     with _connect() as conn:
         rows = conn.execute(
+            "SELECT DISTINCT currency FROM transactions ORDER BY currency"
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+# ── Exchange rates ─────────────────────────────────────────────────────────────
+
+def get_exchange_rates(month: str) -> dict[str, float]:
+    """Return {currency: rate_to_eur} for the given YYYY-MM."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT currency, rate_to_eur FROM exchange_rates WHERE month = ?", (month,)
+        ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
+def get_all_exchange_rates() -> list[dict]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT month, currency, rate_to_eur, updated_at FROM exchange_rates ORDER BY month DESC, currency"
+        ).fetchall()
+    return [{"month": r[0], "currency": r[1], "rate_to_eur": r[2], "updated_at": r[3]} for r in rows]
+
+
+def set_exchange_rate(month: str, currency: str, rate: float) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO exchange_rates (month, currency, rate_to_eur, updated_at) VALUES (?, ?, ?, datetime('now'))",
+            (month, currency.upper(), rate),
+        )
+
+
+def delete_exchange_rate(month: str, currency: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            "DELETE FROM exchange_rates WHERE month = ? AND currency = ?",
+            (month, currency.upper()),
+        )
+
+
+# ── Merchant rules ─────────────────────────────────────────────────────────────
+
+def get_merchant_rules() -> list[dict]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT merchant, category, updated_at FROM merchant_rules ORDER BY merchant"
+        ).fetchall()
+    return [{"merchant": r[0], "category": r[1], "updated_at": r[2]} for r in rows]
+
+
+def set_merchant_rule(merchant: str, category: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO merchant_rules (merchant, category, updated_at) VALUES (?, ?, datetime('now'))",
+            (merchant, category),
+        )
+
+
+def delete_merchant_rule(merchant: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("DELETE FROM merchant_rules WHERE merchant = ?", (merchant,))
+
+
+# ── Transaction category update ────────────────────────────────────────────────
+
+def update_transaction_category(tx_id: int, category: str) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE transactions SET category = ? WHERE id = ?", (category, tx_id)
+        )
+
+
+# ── Summary ────────────────────────────────────────────────────────────────────
+
+def _convert_to_base(
+    amount: float, from_cur: str, base_cur: str, rates: dict[str, float]
+) -> tuple[float, bool]:
+    """Convert amount from from_cur to base_cur. Returns (amount, converted_ok)."""
+    if from_cur == base_cur:
+        return amount, True
+
+    # to EUR first
+    if from_cur == "EUR":
+        eur = amount
+    elif from_cur in rates:
+        eur = amount * rates[from_cur]
+    else:
+        return amount, False
+
+    if base_cur == "EUR":
+        return eur, True
+    elif base_cur in rates:
+        return eur / rates[base_cur], True
+    else:
+        return amount, False
+
+
+def get_monthly_summary(month: str, base_currency: str = "EUR") -> dict:
+    init_db()
+    base_currency = base_currency.upper()
+    with _connect() as conn:
+        rows = conn.execute(
             """
-            SELECT category, currency, SUM(amount) as total, COUNT(*) as cnt
+            SELECT COALESCE(category, 'Прочее'), currency, SUM(amount), COUNT(*)
             FROM transactions
             WHERE substr(date, 1, 7) = ?
-            GROUP BY category, currency
-            ORDER BY total ASC
+            GROUP BY COALESCE(category, 'Прочее'), currency
+            ORDER BY COALESCE(category, 'Прочее'), currency
             """,
             (month,),
         ).fetchall()
 
-    expenses, income = [], []
-    for cat, cur, total, cnt in rows:
-        item = {"category": cat or "Прочее", "currency": cur, "total": round(total, 2), "count": cnt}
-        (expenses if total < 0 else income).append(item)
+    rates = get_exchange_rates(month)
 
-    return {"expenses": expenses, "income": income}
+    by_cat: dict[str, dict] = {}
+    for cat, cur, total, cnt in rows:
+        if cat not in by_cat:
+            by_cat[cat] = {"total_base": 0.0, "count": 0, "breakdown": [], "missing_rate": False}
+        converted, ok = _convert_to_base(total, cur, base_currency, rates)
+        if not ok:
+            by_cat[cat]["missing_rate"] = True
+        by_cat[cat]["total_base"] += converted
+        by_cat[cat]["count"] += cnt
+        by_cat[cat]["breakdown"].append({"currency": cur, "total": round(total, 2), "count": cnt})
+
+    expenses, income = [], []
+    for cat, data in by_cat.items():
+        item = {
+            "category": cat,
+            "total": round(data["total_base"], 2),
+            "currency": base_currency,
+            "count": data["count"],
+            "missing_rate": data["missing_rate"],
+            "breakdown": data["breakdown"],
+        }
+        (expenses if data["total_base"] < 0 else income).append(item)
+
+    expenses.sort(key=lambda x: x["total"])
+    income.sort(key=lambda x: -x["total"])
+
+    return {"expenses": expenses, "income": income, "base_currency": base_currency}
 
 
 def get_transactions_by_category(month: str, category: str) -> list[dict]:
-    """Return transactions for a given month and category, newest first."""
     init_db()
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT date, tx_date, description, amount, currency, bank
+            SELECT id, date, tx_date, description, amount, currency, bank, category
             FROM transactions
             WHERE substr(date, 1, 7) = ? AND COALESCE(category, 'Прочее') = ?
             ORDER BY date DESC
@@ -209,8 +349,8 @@ def get_transactions_by_category(month: str, category: str) -> list[dict]:
             (month, category),
         ).fetchall()
     return [
-        {"date": r[0], "tx_date": r[1], "description": r[2],
-         "amount": r[3], "currency": r[4], "bank": r[5]}
+        {"id": r[0], "date": r[1], "tx_date": r[2], "description": r[3],
+         "amount": r[4], "currency": r[5], "bank": r[6], "category": r[7]}
         for r in rows
     ]
 
