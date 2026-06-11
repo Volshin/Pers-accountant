@@ -125,7 +125,7 @@ header h1{font-size:15px;font-weight:700;letter-spacing:.5px;white-space:nowrap}
 .dialog-box{background:#fff;border-radius:18px 18px 0 0;padding:22px 18px 32px;width:100%;max-width:560px;box-shadow:0 -4px 24px rgba(0,0,0,.15)}
 .dialog-title{font-size:16px;font-weight:700;margin-bottom:4px}
 .dialog-sub{font-size:13px;color:var(--muted);margin-bottom:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dialog-select{width:100%;border:1.5px solid #e5e7eb;border-radius:10px;padding:11px 12px;font-size:15px;outline:none;margin-bottom:16px;background:#fafafa}
+.dialog-select{width:100%;border:1.5px solid #e5e7eb;border-radius:10px;padding:11px 12px;font-size:15px;outline:none;margin-bottom:16px;background:#fafafa;appearance:none;-webkit-appearance:none}
 .dialog-select:focus{border-color:var(--primary)}
 .dialog-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .dialog-btn{border:none;border-radius:12px;padding:13px 10px;font-size:13px;font-weight:700;cursor:pointer;line-height:1.2}
@@ -134,6 +134,15 @@ header h1{font-size:15px;font-weight:700;letter-spacing:.5px;white-space:nowrap}
 .dialog-btn-all{background:var(--primary);color:#fff}
 .dialog-btn-all:hover{background:#1d4ed8}
 .dialog-cancel{display:block;width:100%;background:none;border:none;color:var(--muted);font-size:14px;padding:14px 0 0;cursor:pointer;text-align:center}
+
+/* ── MERCHANT RULES VIEW ── */
+.rule-row{background:var(--card);border-radius:var(--radius);padding:13px 14px;box-shadow:var(--shadow);display:flex;align-items:center;gap:10px}
+.rule-info{flex:1;min-width:0}
+.rule-merchant{font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rule-category{font-size:12px;color:var(--muted);margin-top:3px}
+.delete-rule-btn{background:#fee2e2;color:var(--expense);border:none;border-radius:10px;font-size:12px;font-weight:700;padding:7px 12px;cursor:pointer;flex-shrink:0;white-space:nowrap;transition:background .2s,color .2s}
+.delete-rule-btn.confirming{background:var(--expense);color:#fff}
+.delete-rule-btn:disabled{opacity:.4;cursor:default}
 </style>
 </head>
 <body>
@@ -177,7 +186,15 @@ header h1{font-size:15px;font-weight:700;letter-spacing:.5px;white-space:nowrap}
     </div>
     <div id="lists"></div>
     <button class="imports-link" onclick="showImports()">История импортов ›</button>
+    <button class="rates-link" onclick="showRules()">Правила мерчантов ›</button>
     <a class="rates-link" href="/rates">Курсы валют ›</a>
+  </div>
+
+  <!-- Merchant rules view -->
+  <div id="rules-view" style="display:none">
+    <button class="tx-back" onclick="backFromRules()">‹ Назад</button>
+    <div class="section-title">Правила мерчантов</div>
+    <div class="category-list" id="rules-list"></div>
   </div>
 
   <!-- Imports view -->
@@ -204,8 +221,8 @@ header h1{font-size:15px;font-weight:700;letter-spacing:.5px;white-space:nowrap}
   <div class="dialog-box">
     <div class="dialog-title">Изменить категорию</div>
     <div class="dialog-sub" id="dialog-desc">—</div>
-    <input class="dialog-select" id="dialog-cat-input" list="dialog-cat-list" placeholder="Выберите или введите категорию…" autocomplete="off">
-    <datalist id="dialog-cat-list"></datalist>
+    <select class="dialog-select" id="dialog-cat-select" onchange="onDialogCatChange()"></select>
+    <input class="dialog-select" id="dialog-cat-new" type="text" placeholder="Название новой категории…" style="display:none;margin-top:-8px">
     <div class="dialog-actions">
       <button class="dialog-btn dialog-btn-one" onclick="confirmCatChange(false)">Только эту</button>
       <button class="dialog-btn dialog-btn-all" onclick="confirmCatChange(true)">Все транзакции<br>этого мерчанта</button>
@@ -421,8 +438,7 @@ function backToSummary() {
 }
 
 async function showImports() {
-  document.getElementById('summary-view').style.display = 'none';
-  document.getElementById('tx-view').style.display      = 'none';
+  _hideAllViews();
   document.getElementById('imports-view').style.display = 'block';
   window.scrollTo(0, 0);
   await loadImports();
@@ -481,13 +497,31 @@ function openCatDialog(txId, description, currentCategory) {
   _editTx = {id: txId, description, currentCategory};
   document.getElementById('dialog-desc').textContent = description || '—';
 
-  const inp = document.getElementById('dialog-cat-input');
-  inp.value = currentCategory || '';
-  const dl = document.getElementById('dialog-cat-list');
-  dl.innerHTML = S.categories.map(c => `<option value="${escHtml(c)}">`).join('');
+  const sel = document.getElementById('dialog-cat-select');
+  const cats = S.categories.includes(currentCategory) || !currentCategory
+    ? S.categories
+    : [currentCategory, ...S.categories];
+  sel.innerHTML = cats.map(c =>
+    `<option value="${escHtml(c)}"${c === currentCategory ? ' selected' : ''}>${escHtml(c)}</option>`
+  ).join('') + '<option value="__new__">— Добавить новую —</option>';
+
+  const newInp = document.getElementById('dialog-cat-new');
+  newInp.value = '';
+  newInp.style.display = 'none';
 
   document.getElementById('cat-dialog').classList.add('open');
-  setTimeout(() => inp.focus(), 80);
+}
+
+function onDialogCatChange() {
+  const sel = document.getElementById('dialog-cat-select');
+  const newInp = document.getElementById('dialog-cat-new');
+  if (sel.value === '__new__') {
+    newInp.style.display = '';
+    setTimeout(() => newInp.focus(), 50);
+  } else {
+    newInp.style.display = 'none';
+    newInp.value = '';
+  }
 }
 
 function closeCatDialog(evt) {
@@ -498,7 +532,10 @@ function closeCatDialog(evt) {
 
 async function confirmCatChange(applyToAll) {
   if (!_editTx) return;
-  const newCat = document.getElementById('dialog-cat-input').value.trim();
+  const sel = document.getElementById('dialog-cat-select');
+  const newCat = sel.value === '__new__'
+    ? document.getElementById('dialog-cat-new').value.trim()
+    : sel.value;
   if (!newCat) return;
   document.getElementById('cat-dialog').classList.remove('open');
 
@@ -544,6 +581,63 @@ function escHtml(s) {
 }
 function escJs(s) {
   return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+}
+
+// ── Merchant rules view ──────────────────────────────────────────────────────
+
+function _hideAllViews() {
+  ['summary-view','tx-view','imports-view','rules-view'].forEach(
+    id => document.getElementById(id).style.display = 'none'
+  );
+}
+
+async function showRules() {
+  _hideAllViews();
+  document.getElementById('rules-view').style.display = 'block';
+  window.scrollTo(0, 0);
+  await loadRules();
+}
+
+function backFromRules() {
+  document.getElementById('rules-view').style.display   = 'none';
+  document.getElementById('summary-view').style.display = 'block';
+}
+
+async function loadRules() {
+  const r = await fetch('/api/merchant-rules');
+  const rules = await r.json();
+  const el = document.getElementById('rules-list');
+  if (!rules.length) {
+    el.innerHTML = '<div class="empty">Правил ещё нет.</div>';
+    return;
+  }
+  el.innerHTML = rules.map(rule => `
+    <div class="rule-row">
+      <div class="rule-info">
+        <div class="rule-merchant" title="${escHtml(rule.merchant)}">${escHtml(rule.merchant)}</div>
+        <div class="rule-category">${escHtml(rule.category)}</div>
+      </div>
+      <button class="delete-rule-btn" onclick="deleteRule('${escJs(rule.merchant)}',this)">Удалить</button>
+    </div>`).join('');
+}
+
+async function deleteRule(merchant, btn) {
+  if (!btn.dataset.confirming) {
+    btn.dataset.confirming = '1';
+    btn.classList.add('confirming');
+    btn.textContent = 'Точно?';
+    setTimeout(() => {
+      if (btn.dataset.confirming) {
+        btn.dataset.confirming = '';
+        btn.classList.remove('confirming');
+        btn.textContent = 'Удалить';
+      }
+    }, 3000);
+    return;
+  }
+  btn.disabled = true;
+  await fetch(`/api/merchant-rules/${encodeURIComponent(merchant)}`, {method: 'DELETE'});
+  await loadRules();
 }
 
 init();
