@@ -7,6 +7,7 @@ from core.db import (
     get_all_exchange_rates, get_exchange_rates, set_exchange_rate, delete_exchange_rate,
     get_merchant_rules, set_merchant_rule, delete_merchant_rule, apply_merchant_rule_to_existing,
     update_transaction_category, get_currencies,
+    get_internal_transfers, get_uncategorized,
 )
 from pathlib import Path
 import json
@@ -76,6 +77,20 @@ def api_transactions(month, category):
     if not _MONTH_RE.match(month):
         abort(400)
     return jsonify(get_transactions_by_category(month, category))
+
+
+@app.route("/api/uncategorized/<month>")
+def api_uncategorized(month):
+    if not _MONTH_RE.match(month):
+        abort(400)
+    return jsonify(get_uncategorized(month))
+
+
+@app.route("/api/internal/<month>")
+def api_internal(month):
+    if not _MONTH_RE.match(month):
+        abort(400)
+    return jsonify(get_internal_transfers(month))
 
 
 @app.route("/api/transaction/<int:tx_id>/category", methods=["PATCH"])

@@ -1,9 +1,26 @@
 import hashlib
+import re
 import sqlite3
 from pathlib import Path
 import pandas as pd
 
 DB_PATH = Path(__file__).parent.parent / "transactions.db"
+
+
+def normalize_merchant(s: str) -> str:
+    """Normalize a merchant/description string for stable rule matching.
+
+    OCR and parser noise (extra spaces, casing, trailing owner-name fragments
+    like "Валерьевич", card tails) should not prevent a rule from matching the
+    same merchant. Returns a lowercased, whitespace-collapsed key.
+    """
+    if not s:
+        return ""
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s).strip()
+    # Strip trailing punctuation OCR leaves.
+    s = s.rstrip(".,;: ")
+    return s
 
 
 def _connect() -> sqlite3.Connection:
@@ -27,6 +44,7 @@ def init_db() -> None:
                 description TEXT,
                 category    TEXT,
                 bank        TEXT,
+                tx_type     TEXT    DEFAULT 'normal',
                 imported_at TEXT    DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_date      ON transactions(date);
@@ -38,6 +56,9 @@ def init_db() -> None:
                 filename    TEXT NOT NULL,
                 bank        TEXT,
                 inserted    INTEGER NOT NULL DEFAULT 0,
+                parsed_total INTEGER NOT NULL DEFAULT 0,
+                skipped     INTEGER NOT NULL DEFAULT 0,
+                status      TEXT    DEFAULT 'ok',
                 imported_at TEXT    DEFAULT (datetime('now'))
             );
 
@@ -61,6 +82,17 @@ def init_db() -> None:
         if "import_id" not in cols:
             conn.execute("ALTER TABLE transactions ADD COLUMN import_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_import_id ON transactions(import_id)")
+        if "tx_type" not in cols:
+            conn.execute("ALTER TABLE transactions ADD COLUMN tx_type TEXT DEFAULT 'normal'")
+
+    with _connect() as conn:
+        icols = [r[1] for r in conn.execute("PRAGMA table_info(imports)").fetchall()]
+        if "parsed_total" not in icols:
+            conn.execute("ALTER TABLE imports ADD COLUMN parsed_total INTEGER NOT NULL DEFAULT 0")
+        if "skipped" not in icols:
+            conn.execute("ALTER TABLE imports ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0")
+        if "status" not in icols:
+            conn.execute("ALTER TABLE imports ADD COLUMN status TEXT DEFAULT 'ok'")
 
 
 def _fingerprint(row: dict) -> str:
@@ -89,8 +121,8 @@ def insert_transactions(df: pd.DataFrame, import_id: str) -> tuple[int, int]:
                 conn.execute(
                     """
                     INSERT INTO transactions
-                        (fingerprint, import_id, date, tx_date, currency, amount, description, category, bank)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (fingerprint, import_id, date, tx_date, currency, amount, description, category, bank, tx_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         fp,
@@ -102,6 +134,7 @@ def insert_transactions(df: pd.DataFrame, import_id: str) -> tuple[int, int]:
                         row.get("description"),
                         row.get("category"),
                         row.get("bank"),
+                        row.get("tx_type", "normal"),
                     ),
                 )
                 inserted += 1
@@ -111,12 +144,24 @@ def insert_transactions(df: pd.DataFrame, import_id: str) -> tuple[int, int]:
     return inserted, skipped
 
 
-def record_import(import_id: str, filename: str, bank: str, inserted: int) -> None:
+def record_import(
+    import_id: str,
+    filename: str,
+    bank: str,
+    inserted: int,
+    parsed_total: int = 0,
+    skipped: int = 0,
+    status: str = "ok",
+) -> None:
     init_db()
     with _connect() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO imports (import_id, filename, bank, inserted) VALUES (?, ?, ?, ?)",
-            (import_id, filename, bank, inserted),
+            """
+            INSERT OR REPLACE INTO imports
+                (import_id, filename, bank, inserted, parsed_total, skipped, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (import_id, filename, bank, inserted, parsed_total, skipped, status),
         )
 
 
@@ -124,11 +169,13 @@ def get_imports() -> list[dict]:
     init_db()
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT import_id, filename, bank, inserted, imported_at FROM imports ORDER BY imported_at DESC"
+            "SELECT import_id, filename, bank, inserted, parsed_total, skipped, status, imported_at "
+            "FROM imports ORDER BY imported_at DESC"
         ).fetchall()
     return [
         {"import_id": r[0], "filename": r[1], "bank": r[2],
-         "inserted": r[3], "imported_at": r[4]}
+         "inserted": r[3], "parsed_total": r[4], "skipped": r[5],
+         "status": r[6], "imported_at": r[7]}
         for r in rows
     ]
 
@@ -264,14 +311,25 @@ def delete_merchant_rule(merchant: str) -> None:
 
 
 def apply_merchant_rule_to_existing(merchant: str, category: str) -> int:
-    """Update category for all existing transactions with this description. Returns count."""
+    """Update category for all existing transactions matching this merchant.
+
+    Matches on the *normalized* description so OCR/parser noise (casing, spacing,
+    trailing punctuation) does not break the rule. Returns the number of rows
+    updated.
+    """
     init_db()
+    key = normalize_merchant(merchant)
     with _connect() as conn:
-        cur = conn.execute(
-            "UPDATE transactions SET category = ? WHERE description = ?",
-            (category, merchant),
-        )
-    return cur.rowcount
+        rows = conn.execute(
+            "SELECT id, description FROM transactions WHERE COALESCE(tx_type, 'normal') != 'internal'"
+        ).fetchall()
+        matched_ids = [r[0] for r in rows if normalize_merchant(r[1]) == key]
+        if matched_ids:
+            conn.executemany(
+                "UPDATE transactions SET category = ? WHERE id = ?",
+                [(category, i) for i in matched_ids],
+            )
+    return len(matched_ids)
 
 
 # ── Transaction category update ────────────────────────────────────────────────
@@ -318,6 +376,7 @@ def get_monthly_summary(month: str, base_currency: str = "EUR") -> dict:
             SELECT COALESCE(category, 'Прочее'), currency, SUM(amount), COUNT(*)
             FROM transactions
             WHERE substr(date, 1, 7) = ?
+              AND COALESCE(tx_type, 'normal') != 'internal'
             GROUP BY COALESCE(category, 'Прочее'), currency
             ORDER BY COALESCE(category, 'Прочее'), currency
             """,
@@ -353,6 +412,53 @@ def get_monthly_summary(month: str, base_currency: str = "EUR") -> dict:
     income.sort(key=lambda x: -x["total"])
 
     return {"expenses": expenses, "income": income, "base_currency": base_currency}
+
+
+def get_internal_transfers(month: str) -> list[dict]:
+    """Internal (service) operations for a month: deposits, conversions, own-fund transfers.
+
+    These are excluded from the income/expense summary but shown separately in the
+    dashboard as "Внутренние переводы", because they move money between the user's
+    own products rather than changing net worth.
+    """
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, date, description, amount, currency, bank
+            FROM transactions
+            WHERE substr(date, 1, 7) = ? AND COALESCE(tx_type, 'normal') = 'internal'
+            ORDER BY date DESC
+            """,
+            (month,),
+        ).fetchall()
+    return [
+        {"id": r[0], "date": r[1], "description": r[2],
+         "amount": r[3], "currency": r[4], "bank": r[5]}
+        for r in rows
+    ]
+
+
+def get_uncategorized(month: str) -> list[dict]:
+    """Transactions whose category is missing or the catch-all 'Прочее'."""
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, date, description, amount, currency, bank
+            FROM transactions
+            WHERE substr(date, 1, 7) = ?
+              AND COALESCE(tx_type, 'normal') != 'internal'
+              AND (category IS NULL OR category = '' OR category = 'Прочее')
+            ORDER BY date DESC
+            """,
+            (month,),
+        ).fetchall()
+    return [
+        {"id": r[0], "date": r[1], "description": r[2],
+         "amount": r[3], "currency": r[4], "bank": r[5]}
+        for r in rows
+    ]
 
 
 def get_transactions_by_category(month: str, category: str) -> list[dict]:

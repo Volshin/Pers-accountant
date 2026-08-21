@@ -29,7 +29,8 @@ def import_pdf(path: str) -> None:
         return
 
     print(f"[{path}] Parsed {len(df)} transactions. Categorizing…")
-    df["category"] = categorize_all(df["description"].tolist())
+    tx_types = df["tx_type"].tolist() if "tx_type" in df.columns else None
+    df["category"] = categorize_all(df["description"].tolist(), tx_types)
 
     import_id = str(uuid4())
     inserted, skipped = insert_transactions(df, import_id)

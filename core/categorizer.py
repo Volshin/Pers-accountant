@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_URL = f"{OLLAMA_HOST.rstrip('/')}/api/generate"
-MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b-instruct-q8_0")
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:latest")
 
 log.info(f"Ollama: {OLLAMA_URL} | model: {MODEL}")
 
@@ -23,16 +23,29 @@ def _load_categories() -> list[dict]:
         return json.load(f)
 
 
-def categorize_all(descriptions: list[str]) -> list[str]:
-    from core.db import get_merchant_rules
-    rules = {r["merchant"]: r["category"] for r in get_merchant_rules()}
+INTERNAL_CATEGORY = "Внутренние переводы"
+
+
+def categorize_all(descriptions: list[str], tx_types: list[str] | None = None) -> list[str]:
+    """Assign a category to each description.
+
+    tx_types (parallel to descriptions) lets internal/service transactions
+    (deposits, conversions) bypass the LLM — they get INTERNAL_CATEGORY directly
+    and are never sent to Ollama, since their category is self-evident.
+    """
+    from core.db import get_merchant_rules, normalize_merchant
+    rules = {normalize_merchant(r["merchant"]): r["category"] for r in get_merchant_rules()}
 
     results: list[str | None] = [None] * len(descriptions)
     llm_indices: list[int] = []
 
     for i, desc in enumerate(descriptions):
-        if desc in rules:
-            results[i] = rules[desc]
+        if tx_types and (tx_types[i] if i < len(tx_types) else None) == "internal":
+            results[i] = INTERNAL_CATEGORY
+            continue
+        key = normalize_merchant(desc)
+        if key in rules:
+            results[i] = rules[key]
         else:
             llm_indices.append(i)
 

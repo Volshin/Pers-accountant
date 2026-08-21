@@ -185,6 +185,8 @@ header h1{font-size:15px;font-weight:700;letter-spacing:.5px;white-space:nowrap}
       </div>
     </div>
     <div id="lists"></div>
+    <button class="imports-link" onclick="showUncategorized()">Без категории ›</button>
+    <button class="imports-link" onclick="showInternal()">Внутренние переводы ›</button>
     <button class="imports-link" onclick="showImports()">История импортов ›</button>
     <button class="rates-link" onclick="showRules()">Правила мерчантов ›</button>
     <a class="rates-link" href="/rates">Курсы валют ›</a>
@@ -202,6 +204,20 @@ header h1{font-size:15px;font-weight:700;letter-spacing:.5px;white-space:nowrap}
     <button class="tx-back" onclick="backFromImports()">‹ Назад</button>
     <div class="section-title">История импортов</div>
     <div class="category-list" id="imports-list"></div>
+  </div>
+
+  <!-- Uncategorized view -->
+  <div id="uncat-view" style="display:none">
+    <button class="tx-back" onclick="backToSummary()">‹ Назад</button>
+    <div class="section-title">Без категории</div>
+    <div class="category-list" id="uncat-list"></div>
+  </div>
+
+  <!-- Internal transfers view -->
+  <div id="internal-view" style="display:none">
+    <button class="tx-back" onclick="backToSummary()">‹ Назад</button>
+    <div class="section-title">Внутренние переводы</div>
+    <div class="category-list" id="internal-list"></div>
   </div>
 
   <!-- Transactions view -->
@@ -433,7 +449,9 @@ async function showCategory(item, colorIdx, isExp) {
 }
 
 function backToSummary() {
-  document.getElementById('tx-view').style.display      = 'none';
+  ['tx-view','uncat-view','internal-view'].forEach(id =>
+    document.getElementById(id).style.display = 'none'
+  );
   document.getElementById('summary-view').style.display = 'block';
 }
 
@@ -459,11 +477,20 @@ async function loadImports() {
   }
   el.innerHTML = imports.map(imp => {
     const dt = (imp.imported_at || '').slice(0, 16).replace('T', ' ');
+    const statusBadge = imp.status === 'error'
+      ? '<span style="color:#ef4444;font-weight:700">ошибка</span>'
+      : imp.status === 'duplicate'
+        ? '<span style="color:#f59e0b;font-weight:700">только дубли</span>'
+        : (imp.status === 'empty' ? '<span style="color:#f59e0b;font-weight:700">пусто</span>' : '');
+    const breakdown = imp.parsed_total > 0
+      ? `<div class="import-meta">parsed=${imp.parsed_total}, новых=${imp.inserted}, дублей=${imp.skipped}</div>`
+      : '';
     return `
     <div class="import-row" id="imp-${imp.import_id}">
       <div class="import-info">
         <div class="import-file" title="${imp.filename}">${imp.filename}</div>
-        <div class="import-meta">${dt} · ${imp.bank || '—'}</div>
+        <div class="import-meta">${dt} · ${imp.bank || '—'} ${statusBadge}</div>
+        ${breakdown}
       </div>
       <div class="import-count">${imp.inserted} тр.</div>
       <button class="rollback-btn" onclick="rollbackImport('${imp.import_id}',this)">Откатить</button>
@@ -586,9 +613,59 @@ function escJs(s) {
 // ── Merchant rules view ──────────────────────────────────────────────────────
 
 function _hideAllViews() {
-  ['summary-view','tx-view','imports-view','rules-view'].forEach(
+  ['summary-view','tx-view','imports-view','rules-view','uncat-view','internal-view'].forEach(
     id => document.getElementById(id).style.display = 'none'
   );
+}
+
+async function showUncategorized() {
+  _hideAllViews();
+  document.getElementById('uncat-view').style.display = 'block';
+  window.scrollTo(0, 0);
+  const month = S.months[S.idx];
+  const r = await fetch(`/api/uncategorized/${month}`);
+  const txs = await r.json();
+  const el = document.getElementById('uncat-list');
+  if (!txs.length) { el.innerHTML = '<div class="empty">Всё категоризировано.</div>'; return; }
+  el.innerHTML = txs.map(tx => `
+    <div class="tx-row">
+      <div class="tx-top">
+        <div class="tx-desc" title="${escHtml(tx.description)}">${escHtml(tx.description)}</div>
+        <div class="tx-amt" style="color:${tx.amount<0?'var(--expense)':'var(--income)'}">
+          ${tx.amount<0?'−':'+'}${fmt(Math.abs(tx.amount))} ${tx.currency}
+        </div>
+      </div>
+      <div class="tx-bottom">
+        <div class="tx-date">${fmtDate(tx.date)}</div>
+        <div class="bank-badge">${tx.bank}</div>
+        <button class="edit-cat-btn" title="Назначить категорию" onclick="openCatDialog(${tx.id},'${escJs(tx.description)}','')">✎</button>
+      </div>
+    </div>`).join('');
+}
+
+async function showInternal() {
+  _hideAllViews();
+  document.getElementById('internal-view').style.display = 'block';
+  window.scrollTo(0, 0);
+  const month = S.months[S.idx];
+  const r = await fetch(`/api/internal/${month}`);
+  const txs = await r.json();
+  const el = document.getElementById('internal-list');
+  if (!txs.length) { el.innerHTML = '<div class="empty">Внутренних переводов нет.</div>'; return; }
+  el.innerHTML = txs.map(tx => `
+    <div class="tx-row">
+      <div class="tx-top">
+        <div class="tx-desc" title="${escHtml(tx.description)}">${escHtml(tx.description)}</div>
+        <div class="tx-amt" style="color:var(--muted)">
+          ${tx.amount<0?'−':'+'}${fmt(Math.abs(tx.amount))} ${tx.currency}
+        </div>
+      </div>
+      <div class="tx-bottom">
+        <div class="tx-date">${fmtDate(tx.date)}</div>
+        <div class="bank-badge">${tx.bank}</div>
+        <div class="cat-badge">Внутренние переводы</div>
+      </div>
+    </div>`).join('');
 }
 
 async function showRules() {

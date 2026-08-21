@@ -7,6 +7,7 @@ CLAUDE.md
 
 # Секреты и локальный конфиг
 .env
+.webui_secret_key
 
 # Данные — не в репо
 *.pdf
