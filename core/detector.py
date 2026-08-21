@@ -45,13 +45,15 @@ def detect_adapter(pdf_path: str) -> BankAdapter:
     with pdfplumber.open(pdf_path) as pdf:
         first_page_text = pdf.pages[0].extract_text() or ""
 
+    # If the text layer is obfuscated (glyphs map to garbage codepoints), go
+    # straight to OCR — do NOT try the text adapters, they would only produce
+    # junk partial rows. Freedom Bank Kazakhstan is the known case today.
+    if _readable_ratio(first_page_text) < 0.5:
+        return OcrAdapter()
+
     for cls in ADAPTERS:
         if cls.can_handle(first_page_text):
             return cls()
-
-    # Text layer is unusable (obfuscated font) → OCR fallback.
-    if _readable_ratio(first_page_text) < 0.5:
-        return OcrAdapter()
 
     raise ValueError(
         f"No adapter found for '{pdf_path}'. "
