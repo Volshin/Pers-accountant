@@ -87,8 +87,13 @@ _DEPOSIT_MARKERS = re.compile(
 )
 
 # Account-holder / footer noise fragments that OCR wrongly attaches to rows.
+# These show up both at the start AND inside descriptions, so strip them anywhere.
 _NOISE_TAIL = re.compile(
     r"^(?:Валерьевич|Большунов|Олег|Казахстан|Фридом|KZ\d{2}[A-Z0-9]+EUR)\b\s*",
+    re.I,
+)
+_NOISE_INLINE = re.compile(
+    r"\b(?:Казахстан|Валерьевич|Большунов)\b\s*",
     re.I,
 )
 
@@ -237,51 +242,47 @@ def _parse_page_records(text: str, currency: str) -> list[dict]:
     """
     records: list[dict] = []
 
-    # Split into blocks, each starting at a date-anchored line. A block collects
-    # the date row plus any wrapped continuation lines until the next date row.
+    # Freedom lays each card transaction across *lines*, not a single row:
+    #    DD.MM.YYYY <code> ... EUR <amount> <id> Номер карты: ... Сумма
+    #    . транзакции: <amount> EUR Операция: <description>
+    #    карты в чужом устройстве          (wrapped tail)
+    #
+    # Deposit-account rows carry "Вкладчик"/"Прием вклада" and are separate
+    # (they don't touch the card balance) — detect and skip them.
+    #
+    # So we do a single left-to-right pass: remember the most recent date seen
+    # on a card row, and whenever a "транзакции: N EUR Операция: ..." line
+    # appears, that is one transaction with that date and amount.
     lines = text.split("\n")
-    blocks: list[list[str]] = []
-    current: list[str] = []
+    current_date: Optional[str] = None
 
     for line in lines:
-        if _DATE_ROW_RE.match(line.strip()):
-            if current:
-                blocks.append(current)
-            current = [line.rstrip()]
-        else:
-            if current:
-                current.append(line.rstrip())
+        s = line.strip()
 
-    if current:
-        blocks.append(current)
+        # Update "current date" when a card row header appears. Deposit rows
+        # also start with a date, so only take date from lines that are NOT
+        # deposit markers.
+        if _DATE_ROW_RE.match(s) and not _DEPOSIT_MARKERS.search(s):
+            current_date = _DATE_ROW_RE.match(s).group(1)
 
-    for block in blocks:
-        block_text = "\n".join(block).strip()
-        if not block_text:
+        if _DEPOSIT_MARKERS.search(s):
             continue
 
-        # Skip deposit-account rows entirely.
-        if _DEPOSIT_MARKERS.search(block_text):
+        # The canonical transaction line carries both amount and operation.
+        m = _TX_AMOUNT_RE.search(s)
+        if not m:
             continue
 
-        date_str = _DATE_ROW_RE.match(block_text).group(1)
-
-        is_refund = bool(re.search(r"Возврат", block_text, re.I))
-
-        amount = _extract_card_amount(block_text)
-        description = _extract_description(block_text)
-
-        if amount is None:
-            continue
-
-        sign = 1.0 if is_refund else -1.0
+        amount = _recover_amount(m.group(1))
+        is_refund = bool(re.search(r"Возврат", s, re.I))
+        description = _extract_description_from_line(s)
 
         records.append(
             {
-                "date": _fmt_date(date_str),
-                "tx_date": _fmt_date(date_str),
+                "date": _fmt_date(current_date) if current_date else "",
+                "tx_date": _fmt_date(current_date) if current_date else "",
                 "currency": currency,
-                "amount": round(sign * amount, 2),
+                "amount": round((1.0 if is_refund else -1.0) * amount, 2),
                 "description": description or "—",
                 "bank": BANK_NAME,
                 "tx_type": "normal",
@@ -291,77 +292,36 @@ def _parse_page_records(text: str, currency: str) -> list[dict]:
     return records
 
 
-def _extract_card_amount(block: str) -> Optional[float]:
-    """Return the (positive) transaction amount for a card row, best-effort.
+def _recover_amount(raw: str) -> float:
+    """Parse a "транзакции: N" amount, fixing point-drop OCR glitches.
 
-    OCR renders each amount in (at least) two places; one of them may have lost
-    its decimal point ("1913" vs "19.13"). We prefer the "транзакции: N EUR"
-    value when it is a *decimal*, then "сумме N EUR", then the first decimal in
-    the row. If the only candidate seems point-dropped (a 3-4 digit integer that
-    disagrees with a decimal elsewhere in the block), we use the decimal.
+    Tesseract sometimes drops the decimal point when the amount sits next to a
+    suffix ("19.13" -> "1913", "4.11" -> "411"). The reliable signal is that in
+    this statement every amount has exactly two decimals. So:
+      - "19.13" / "3.40" -> parse directly
+      - a bare integer NNN whose length is 3-4 digits is almost always NN.NN
+        with the point lost -> split the last two digits as the fraction.
     """
-    candidates: list[float] = []
-
-    # 1. "транзакции: N EUR" (decimal form preferred)
-    for m in _TX_AMOUNT_RE.finditer(block):
-        raw = m.group(1)
-        if "." in raw or "," in raw:
-            candidates.append((_parse_number(raw), 0))  # priority 0 = trusted
-
-    # 2. "сумме N EUR"
-    for m in _SUMME_AMOUNT_RE.finditer(block):
-        candidates.append((_parse_number(m.group(1)), 0))
-
-    # 3. Any decimal in the block (row amount, doc-id-adjacent, etc.).
-    for m in _ROW_AMOUNT_RE.finditer(block):
-        candidates.append((_parse_number(m.group(1)), 1))
-
-    # Trusted (decimal "транзакции:"/"сумме") candidates win outright.
-    trusted = [c[0] for c in candidates if c[1] == 0 and c[0] > 0]
-    if trusted:
-        # If multiple trusted values disagree wildly, prefer the one that looks
-        # like a 2-decimal money value (not a point-dropped integer).
-        return _pick_plausible(trusted)
-
-    fallback = [c[0] for c in candidates if c[0] > 0]
-    if not fallback:
-        return None
-    return _pick_plausible(fallback)
+    raw = raw.replace(",", ".").strip()
+    if "." in raw:
+        return _parse_number(raw)
+    # Bare integer: if it looks like a point-dropped 2-decimal value, split.
+    if raw.isdigit() and 3 <= len(raw) <= 4:
+        return float(raw[:-2] + "." + raw[-2:])
+    return _parse_number(raw)
 
 
-def _pick_plausible(values: list[float]) -> float:
-    """Given candidate amounts, return the most plausible money value.
-
-    Heuristic: a correct card amount in this statement is a small 2-decimal
-    number. A point-dropped OCR glitch turns "19.13" into "1913" — i.e. an
-    integer >= 100 that is ~100x a sibling decimal. When a decimal sibling
-    exists, prefer it.
-    """
-    decimals = [v for v in values if v < 1000 and v == round(v, 2)]
-    if decimals:
-        # If there's a huge integer that is ~100x a decimal, the decimal wins.
-        return decimals[0]
-    if values:
-        return values[0]
-    return 0.0
-
-
-def _extract_description(block: str) -> str:
-    """Recover a human description from the block.
-
-    Preferred: the "Операция: ..." phrase. Fallback: text after the amount/id
-    section, minus the 'Номер карты' boilerplate.
-    """
-    m = re.search(r"Операция:\s*(.+?)(?:\s+(?:Дата|Код|Номер)\b|$)", block, re.I | re.S)
+def _extract_description_from_line(line: str) -> str:
+    """Recover the human description from a "транзакции: ... Операция: ..." line."""
+    m = re.search(r"Операция:\s*(.+?)(?:\s+(?:Дата|Код|Номер)\b|$)", line, re.I)
     if m:
         return _clean_description(m.group(1))
-
-    # Fallback: strip leading date/code/amount/IBAN noise, keep a short tail.
-    stripped = _DATE_ROW_RE.sub("", block)
-    stripped = re.sub(r"(?:Банк|Bank)\s+[A-Z]+\s*\w*\s*", "", stripped, flags=re.I)
-    stripped = _NOISE_TAIL.sub("", stripped)
-    description = _clean_description(stripped[:120])
-    return description or "—"
+    # Fallback: everything after the amount.
+    amount = _TX_AMOUNT_RE.search(line)
+    if amount:
+        tail = line[amount.end():]
+        return _clean_description(tail)
+    return ""
 
 
 def _clean_description(s: str) -> str:
@@ -370,6 +330,11 @@ def _clean_description(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     # Trim leading noise tails like "Валерьевич" / account owner fragments.
     s = _NOISE_TAIL.sub("", s).strip()
+    # Strip mid-description account-holder fragments ("Казахстан Валерьевич").
+    s = _NOISE_INLINE.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    # Drop trailing stray glyphs/commas OCR left mid-sentence.
+    s = re.sub(r"[\s,]*$", "", s).strip()
     return s
 
 
