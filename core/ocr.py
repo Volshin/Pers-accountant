@@ -49,46 +49,46 @@ OCR_DPI_SCALE = 3.0  # render scale; ~3x gives Tesseract comfortably large glyph
 BANK_NAME = "freedom_kz"
 
 # ── Regexes for the Freedom Bank "vypiska" text layout ────────────────────────
-_DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
-_TX_DATE_RE = re.compile(r"Дата\s+транзакции:\s*(\d{2}\.\d{2}\.\d{4})", re.I)
-_OPERATION_RE = re.compile(
-    r"Операция:\s*(.+?)(?=\s+Дата\s+транзакции:|\s+Код\s+авторизации:|\s+Номер\s+карты:|$)",
-    re.I | re.S,
-)
-_AMOUNT_RE = re.compile(r"транзакции:\s*([\d\s]+[.,]\d{1,2})\s*([A-Z]{3})?", re.I)
-_CURRENCY_RE = re.compile(r"Валюта:\s*([A-Z]{3})", re.I)
+# Each transaction is a ROW that starts with "DD.MM.YYYY <code>" and holds the
+# account/IBAN token + amount + doc-id + optional "Номер карты" tail. The row
+# may continue onto following lines (OCR wraps), so a record spans from one
+# date-anchored line to the next.
+_DATE_ROW_RE = re.compile(r"^(\d{2}\.\d{2}\.\d{4})\b")
+
+# The amount printed in the transaction row: a decimal number that sits right
+# after the account/IBAN token (which itself ends in the 3-letter currency, e.g.
+# "...KZ65551B629508749EUR 54.91 254462..."). We capture the FIRST decimal that
+# follows such a token, or a bare decimal in the row, preferring the one that is
+# NOT a doc-id (doc-ids are 4-6 digits with no decimal point).
+_ROW_AMOUNT_RE = re.compile(r"(\d{1,3}(?:[\s\u00a0]\d{3})*[.,]\d{1,2})")
+
+# "транзакции: N EUR" appears on the wrapped description line and mirrors the
+# same amount. Used as a cross-check / fallback only.
+_TX_AMOUNT_RE = re.compile(r"транзакции:\s*([\d]+(?:[.,]\d{1,2})?)\s*EUR\b", re.I)
+_SUMME_AMOUNT_RE = re.compile(r"(?:сумме|сумма)\s+([\d\s]+[.,]\d{1,2})\s*EUR", re.I)
+
+# Opening / closing balance from the statement header/footer.
 _OPENING_RE = re.compile(r"Входящий\s+остаток:\s*([\d\s]+[.,]\d{2})", re.I)
 _CLOSING_RE = re.compile(r"Исходящий\s+остаток:\s*([\d\s]+[.,]\d{2})", re.I)
-_IBAN_RE = re.compile(r"KZ\d{2}[A-Z0-9]{10,}", re.I)
-# Transaction anchor row: date + IBAN, followed later by a Дебет/Кредит amount.
-# Numbers sit in the Debit/Credit columns right after the account number.
-_DEBIT_CREDIT_AMOUNT_RE = re.compile(
-    r"([\d\s]+[.,]\d{1,2})\s+(\d{4,})", re.I
-)
+
+# Currency from "Валюта: XXX" or trailing currency in the account token.
+_CURRENCY_RE = re.compile(r"Валюта:\s*([A-Z]{3})", re.I)
+_ACCOUNT_CURRENCY_RE = re.compile(r"KZ\d{2}[A-Z0-9]{8,}([A-Z]{3})\b", re.I)
 
 # ── Internal (service) transaction classification ─────────────────────────────
-# These move money between the user's own products and must NOT count as
-# income/expense in the budget dashboard. They still move the account balance,
-# so they stay in the DB (keeps the running-balance oracle consistent) but are
-# tagged `tx_type = "internal"` and shown as "Внутренние переводы".
-_INTERNAL_MARKERS = re.compile(
-    r"Выплата\s+вклада|Прием\s+вклада|Приём\s+вклада|депозитного\s+договора|"
-    r"депозит|Конвертац|Transfer\s+of\s+own\s+funds|Вкладчик",
+# Freedom's Deposit Card runs a "deposit" account alongside the card account.
+# Rows carrying these markers belong to that deposit account (technical round
+# trips of the same money) and do NOT touch the card balance. We skip them
+# entirely so they never pollute card income/expense.
+_DEPOSIT_MARKERS = re.compile(
+    r"Вкладчик|Прием\s+вклада|Приём\s+вклада|Выплата\s+вклада|"
+    r"депозитного\s+договора|депозит",
     re.I,
 )
 
-# Which operation label each internal marker maps to (for a clean description).
-_INTERNAL_LABEL = [
-    (re.compile(r"Конвертац", re.I), "Конвертация валюты"),
-    (re.compile(r"Transfer\s+of\s+own\s+funds", re.I), "Перевод собственных средств"),
-    (re.compile(r"Выплата\s+вклада", re.I), "Выплата вклада"),
-    (re.compile(r"Прием\s+вклада|Приём\s+вклада", re.I), "Приём вклада"),
-]
-
-# Account holder tails like "Валерьевич" that OCR wrongly attaches to a row.
+# Account-holder / footer noise fragments that OCR wrongly attaches to rows.
 _NOISE_TAIL = re.compile(
-    r"^(?:Валерьевич|Большунов|Олег|Казахстан|Фридом|KZ65551B629508749EUR|"
-    r"Валерьевич\.|Валерьевич,)\b\s*",
+    r"^(?:Валерьевич|Большунов|Олег|Казахстан|Фридом|KZ\d{2}[A-Z0-9]+EUR)\b\s*",
     re.I,
 )
 
@@ -152,7 +152,7 @@ def run_ocr(pdf_path: Path | str) -> OcrResult:
     result.closing_balance = _find_amount(result.raw_text, _CLOSING_RE)
     currency = _find_currency(result.raw_text)
 
-    result.records = _parse_records(pages_text, currency)
+    result.records = _parse_page_records(result.raw_text, currency)
 
     _check_balance(result)
     return result
@@ -202,7 +202,7 @@ def _find_currency(text: str) -> str:
     if m:
         return m.group(1).upper()
     # Freedom prints the account like "KZ65551B629508749EUR" — trailing currency.
-    m2 = re.search(r"KZ\d{2}[A-Z0-9]{8,}([A-Z]{3})\b", text)
+    m2 = _ACCOUNT_CURRENCY_RE.search(text)
     if m2:
         return m2.group(1)
     return "EUR"
@@ -213,7 +213,6 @@ def _parse_number(s: str) -> float:
     if s is None:
         return 0.0
     s = s.replace("\u00a0", " ").replace(",", ".").strip()
-    # Remove spaces that OCR may insert inside thousands: "6 487.95" -> "6487.95"
     m = re.search(r"(\d[\d\s]*\.\d{1,2})", s)
     if not m:
         return 0.0
@@ -224,172 +223,145 @@ def _parse_number(s: str) -> float:
         return 0.0
 
 
-def _parse_records(pages_text: list[str], currency: str) -> list[dict]:
-    """Extract transactions from OCR'ed pages.
+def _parse_page_records(text: str, currency: str) -> list[dict]:
+    """Extract card transactions from OCR'ed text.
 
-    Freedom lays each transaction across a visual block. The reliable anchor is
-    "Дата транзакции: DD.MM.YYYY". Within the window between one anchor and the
-    next, the transaction amount appears in one of two places:
+    Each card transaction is a row starting with "DD.MM.YYYY <code>" that does
+    NOT carry a deposit marker. Deposit rows ("Вкладчик", "Прием вклада", ...)
+    belong to the parallel deposit account and are skipped, because they do not
+    change the card balance.
 
-      1. the Debit/Credit column — a decimal number sitting right after the
-         account/IBAN token and before a 4-6 digit document code, e.g.
-         "... KZ65551B629508749EUR 54.91 254462 ..."
-      2. the "Сумма транзакции: N EUR" line (OCR may split it across lines).
+    The amount is the first plausible decimal in the row, cross-checked against
+    the "транзакции: N EUR" line when present; a refund ("Возврат") is income
+    (positive), everything else is an expense (negative).
     """
     records: list[dict] = []
 
-    for page_text in pages_text:
-        records.extend(_parse_page_records(page_text, currency))
+    # Split into blocks, each starting at a date-anchored line. A block collects
+    # the date row plus any wrapped continuation lines until the next date row.
+    lines = text.split("\n")
+    blocks: list[list[str]] = []
+    current: list[str] = []
 
-    return records
+    for line in lines:
+        if _DATE_ROW_RE.match(line.strip()):
+            if current:
+                blocks.append(current)
+            current = [line.rstrip()]
+        else:
+            if current:
+                current.append(line.rstrip())
 
+    if current:
+        blocks.append(current)
 
-def _parse_page_records(text: str, currency: str) -> list[dict]:
-    records: list[dict] = []
-
-    # 1) Regular card transactions: anchored by "Дата транзакции: DD.MM.YYYY".
-    tx_date_iter = list(_TX_DATE_RE.finditer(text))
-
-    for i, m in enumerate(tx_date_iter):
-        date_str = m.group(1)
-        start = m.end()
-        end = tx_date_iter[i + 1].start() if i + 1 < len(tx_date_iter) else len(text)
-        window = text[start:end]
-
-        amount = _extract_amount(window)
-        if amount is None:
-            amount = 0.0
-
-        op_m = _OPERATION_RE.search(window)
-        description = op_m.group(1).strip() if op_m else ""
-        description = _clean_description(description)
-
-        if not description and amount == 0.0:
+    for block in blocks:
+        block_text = "\n".join(block).strip()
+        if not block_text:
             continue
+
+        # Skip deposit-account rows entirely.
+        if _DEPOSIT_MARKERS.search(block_text):
+            continue
+
+        date_str = _DATE_ROW_RE.match(block_text).group(1)
+
+        is_refund = bool(re.search(r"Возврат", block_text, re.I))
+
+        amount = _extract_card_amount(block_text)
+        description = _extract_description(block_text)
+
+        if amount is None:
+            continue
+
+        sign = 1.0 if is_refund else -1.0
 
         records.append(
             {
                 "date": _fmt_date(date_str),
                 "tx_date": _fmt_date(date_str),
                 "currency": currency,
-                "amount": -amount if amount > 0 else 0.0,
+                "amount": round(sign * amount, 2),
                 "description": description or "—",
                 "bank": BANK_NAME,
                 "tx_type": "normal",
             }
         )
 
-    # 2) Internal service operations (deposit transfers, conversions). These have
-    #    no "Дата транзакции:" anchor — they carry "Выплата вклада", "Приём вклада",
-    #    "Конвертация", "Transfer of own funds", "Вкладчик ..." instead.
-    records.extend(_parse_internal_records(text, currency))
-
     return records
 
 
-def _parse_internal_records(text: str, currency: str) -> list[dict]:
-    """Collect internal (service) transactions: deposit in/out, conversions.
+def _extract_card_amount(block: str) -> Optional[float]:
+    """Return the (positive) transaction amount for a card row, best-effort.
 
-    These are anchored by a date row `DD.MM.YYYY <code> ... <marker>` where the
-    marker is one of the internal-tx phrases. They must be tagged `tx_type =
-    "internal"` so the dashboard shows them as "Внутренние переводы", not as
-    income/expense.
+    OCR renders each amount in (at least) two places; one of them may have lost
+    its decimal point ("1913" vs "19.13"). We prefer the "транзакции: N EUR"
+    value when it is a *decimal*, then "сумме N EUR", then the first decimal in
+    the row. If the only candidate seems point-dropped (a 3-4 digit integer that
+    disagrees with a decimal elsewhere in the block), we use the decimal.
     """
-    records: list[dict] = []
+    candidates: list[float] = []
 
-    # Split the text into logical blocks at row-start dates.
-    # A service block starts with "DD.MM.YYYY" and (somewhere in it) an internal marker.
-    lines = text.split("\n")
-    # Join everything to one line-array but keep structured: find date rows.
-    for i, line in enumerate(lines):
-        line = line.strip()
-        m = _DATE_RE.search(line)
-        if not m or not line.startswith(m.group(1)[:8]) and not re.match(r"^\d{2}\.\d{2}\.\d{4}", line):
-            # only match rows that START with a DD.MM.YYYY date
-            if not re.match(r"^\d{2}\.\d{2}\.\d{4}", line):
-                continue
-        if not re.match(r"^\d{2}\.\d{2}\.\d{4}", line):
-            continue
+    # 1. "транзакции: N EUR" (decimal form preferred)
+    for m in _TX_AMOUNT_RE.finditer(block):
+        raw = m.group(1)
+        if "." in raw or "," in raw:
+            candidates.append((_parse_number(raw), 0))  # priority 0 = trusted
 
-        # Gather this row plus following non-date rows as the block window.
-        block_lines = [line]
-        j = i + 1
-        while j < len(lines) and not re.match(r"^\d{2}\.\d{2}\.\d{4}", lines[j].strip()):
-            block_lines.append(lines[j].strip())
-            j += 1
-        block = "\n".join(block_lines)
+    # 2. "сумме N EUR"
+    for m in _SUMME_AMOUNT_RE.finditer(block):
+        candidates.append((_parse_number(m.group(1)), 0))
 
-        # Only take it if it looks like a service operation.
-        marker = _INTERNAL_MARKERS.search(block)
-        if not marker:
-            continue
+    # 3. Any decimal in the block (row amount, doc-id-adjacent, etc.).
+    for m in _ROW_AMOUNT_RE.finditer(block):
+        candidates.append((_parse_number(m.group(1)), 1))
 
-        date_str = re.match(r"^(\d{2}\.\d{2}\.\d{4})", block).group(1)
-        label = _classify_internal(block)
+    # Trusted (decimal "транзакции:"/"сумме") candidates win outright.
+    trusted = [c[0] for c in candidates if c[1] == 0 and c[0] > 0]
+    if trusted:
+        # If multiple trusted values disagree wildly, prefer the one that looks
+        # like a 2-decimal money value (not a point-dropped integer).
+        return _pick_plausible(trusted)
 
-        # Amount in deposit rows often appears as "... сумме 5187.89 EUR" or a
-        # standalone decimal before the account/IBAN token.
-        amount = _extract_internal_amount(block)
-
-        records.append(
-            {
-                "date": _fmt_date(date_str),
-                "tx_date": _fmt_date(date_str),
-                "currency": currency,
-                # Sign: we don't know debit vs credit reliably for internal ops;
-                # keep 0 sign-neutral and rely on the balance oracle for
-                # diagnostics. Dashboard shows them separately anyway.
-                "amount": amount,
-                "description": label,
-                "bank": BANK_NAME,
-                "tx_type": "internal",
-            }
-        )
-
-    return records
+    fallback = [c[0] for c in candidates if c[0] > 0]
+    if not fallback:
+        return None
+    return _pick_plausible(fallback)
 
 
-def _classify_internal(block: str) -> str:
-    for pattern, label in _INTERNAL_LABEL:
-        if pattern.search(block):
-            return label
-    return "Внутренний перевод"
+def _pick_plausible(values: list[float]) -> float:
+    """Given candidate amounts, return the most plausible money value.
 
-
-def _extract_internal_amount(block: str) -> float:
-    """Recover amount for internal ops: 'сумме 5187.89 EUR' or '0.01' after code."""
-    # "сумме 5187.89 EUR" pattern
-    m = re.search(r"сумме\s*([\d\s]+[.,]\d{1,2})", block, re.I)
-    if m:
-        return _parse_number(m.group(1))
-    # generic decimal fallback (first one)
-    m2 = re.search(r"([\d][\d\s]*[.,]\d{1,2})", block)
-    if m2:
-        return _parse_number(m2.group(1))
+    Heuristic: a correct card amount in this statement is a small 2-decimal
+    number. A point-dropped OCR glitch turns "19.13" into "1913" — i.e. an
+    integer >= 100 that is ~100x a sibling decimal. When a decimal sibling
+    exists, prefer it.
+    """
+    decimals = [v for v in values if v < 1000 and v == round(v, 2)]
+    if decimals:
+        # If there's a huge integer that is ~100x a decimal, the decimal wins.
+        return decimals[0]
+    if values:
+        return values[0]
     return 0.0
 
 
-def _extract_amount(window: str) -> Optional[float]:
-    """Recover a transaction amount from an OCR window, best-effort.
+def _extract_description(block: str) -> str:
+    """Recover a human description from the block.
 
-    Priority:
-      1. "Сумма транзакции: N EUR" (may be split across a newline).
-      2. Debit/Credit column: decimal before a 4-6 digit document code.
+    Preferred: the "Операция: ..." phrase. Fallback: text after the amount/id
+    section, minus the 'Номер карты' boilerplate.
     """
-    # 1. Сумма транзакции (join the OCR newline-split form "Сумма\nтранзакции:")
-    joined = re.sub(r"\s*\n\s*", " ", window)  # collapse newlines to spaces
-    m = _AMOUNT_RE.search(joined)
+    m = re.search(r"Операция:\s*(.+?)(?:\s+(?:Дата|Код|Номер)\b|$)", block, re.I | re.S)
     if m:
-        return _parse_number(m.group(1))
+        return _clean_description(m.group(1))
 
-    # 2. Debit/Credit column: a decimal amount followed by a 4-6 digit code.
-    #    e.g. "... EUR 54.91 254462 ..." or "... EUR 1.50 107878 ..."
-    for cand in re.finditer(r"([\d][\d\s]{0,9}[.,]\d{1,2})\s+(\d{4,6})(?:\s|$)", joined):
-        amt = _parse_number(cand.group(1))
-        if 0 < amt < 1_000_000:
-            return amt
-
-    return None
+    # Fallback: strip leading date/code/amount/IBAN noise, keep a short tail.
+    stripped = _DATE_ROW_RE.sub("", block)
+    stripped = re.sub(r"(?:Банк|Bank)\s+[A-Z]+\s*\w*\s*", "", stripped, flags=re.I)
+    stripped = _NOISE_TAIL.sub("", stripped)
+    description = _clean_description(stripped[:120])
+    return description or "—"
 
 
 def _clean_description(s: str) -> str:

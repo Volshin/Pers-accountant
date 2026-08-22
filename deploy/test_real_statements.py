@@ -37,7 +37,9 @@ def main() -> None:
         print(f"Нет папки: {folder}")
         sys.exit(1)
 
-    pdfs = sorted(folder.glob("*.pdf"))
+    # Skip hidden files: macOS leaves "._foo.pdf" AppleDouble sidecars when
+    # statements are copied over a FAT/exFAT drive — those are metadata, not PDFs.
+    pdfs = sorted(p for p in folder.glob("*.pdf") if not p.name.startswith("._"))
     if not pdfs:
         print(f"В папке {folder} нет PDF.")
         return
