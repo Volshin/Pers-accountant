@@ -18,7 +18,10 @@ _AMOUNT_RE   = re.compile(r"^\d[\d,]*\.\d{2}$")
 _IBAN_RE     = re.compile(r"^KZ[A-Z0-9]{10,}$")
 _TX_DATE_RE  = re.compile(r"Дата транзакции:\s*(\d{2}\.\d{2}\.\d{4})")
 _OPERACIA_RE    = re.compile(r"Операция:\s*(.+?)(?=\s+Дата транзакции:|\s+Код авторизации:|\s+Выплата вклада|\s+вклада по договору|$)")
-_DEPOSIT_RE     = re.compile(r"Выплата вклада|Transfer of own funds вклада")
+_DEPOSIT_RE     = re.compile(
+    r"Выплата вклада|Приём вклада|Прием вклада|вклада по договору|"
+    r"депозитного договора|депозит|Transfer of own funds вклада"
+)
 _REAL_CREDIT_RE = re.compile(r"Возврат покупки")
 _CURRENCY_RE = re.compile(r"Валюта:\s*([A-Z]{3})")
 
@@ -193,10 +196,12 @@ def _parse_page(
             fallback = re.split(r"\s+Дата транзакции:", desc_raw)[0].strip()
             description = fallback[:200] or "—"
 
-        # Drop internal deposit-related credits; protect real refunds (Возврат покупки)
-        if kd["credit"] > 0 and kd["debit"] == 0:
-            if _DEPOSIT_RE.search(desc_raw) and not _REAL_CREDIT_RE.search(desc_raw):
-                continue
+        # Drop ALL internal deposit movements (both credit AND debit legs of the
+        # round-trip between current + deposit accounts). These never touch the card
+        # balance. Real refunds (Возврат покупки) must be kept — so exclude them from
+        # the drop even if the raw description happens to mention a deposit.
+        if _DEPOSIT_RE.search(desc_raw) and not _REAL_CREDIT_RE.search(desc_raw):
+            continue
 
         # Extract merchant name from backslash-delimited POS path
         if "\\" in description:
