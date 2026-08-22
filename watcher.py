@@ -10,6 +10,7 @@ and writes a text summary to reports/.
 """
 import os
 import sys
+import time
 import logging
 import shutil
 import threading
@@ -48,6 +49,32 @@ def _is_pdf(path: Path) -> bool:
     return path.suffix.lower() == ".pdf" and not path.name.startswith(".")
 
 
+def _wait_until_stable(path: Path, stable_for: float = 2.0, timeout: float = 60.0) -> bool:
+    """Wait until the file size stops changing, i.e. the writer has finished.
+
+    SCP and SMB write files in chunks, so IN_CLOSE_WRITE can fire BETWEEN chunks.
+    Parsing a half-written PDF yields "No /Root object!". Poll the size until it
+    is non-zero AND unchanged for `stable_for` seconds, up to `timeout`. Returns
+    False if the file vanishes or never stabilises.
+    """
+    deadline = time.monotonic() + timeout
+    last_size = -1
+    last_change = time.monotonic()
+    while time.monotonic() < deadline:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            return False
+        if size > 0 and size == last_size:
+            if time.monotonic() - last_change >= stable_for:
+                return True
+        else:
+            last_size = size
+            last_change = time.monotonic()
+        time.sleep(0.3)
+    return False
+
+
 def process_pdf(pdf_path: Path) -> None:
     with _lock:
         if pdf_path.name in _in_progress:
@@ -56,6 +83,11 @@ def process_pdf(pdf_path: Path) -> None:
 
     log.info(f"{'─' * 52}")
     log.info(f"Файл:       {pdf_path.name}")
+
+    # Don't parse a file that's still being written (SCP/SMB chunked writes).
+    if not _wait_until_stable(pdf_path):
+        log.warning(f"Файл не стабилизировался (всё ещё пишется?) — пропускаю: {pdf_path.name}")
+        return
 
     try:
         adapter = detect_adapter(str(pdf_path))
