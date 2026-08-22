@@ -231,96 +231,121 @@ def _parse_number(s: str) -> float:
 def _parse_page_records(text: str, currency: str) -> list[dict]:
     """Extract card transactions from OCR'ed text.
 
-    Each card transaction is a row starting with "DD.MM.YYYY <code>" that does
-    NOT carry a deposit marker. Deposit rows ("Вкладчик", "Прием вклада", ...)
-    belong to the parallel deposit account and are skipped, because they do not
-    change the card balance.
+    Freedom lays each card transaction across several OCR lines:
 
-    The amount is the first plausible decimal in the row, cross-checked against
-    the "транзакции: N EUR" line when present; a refund ("Возврат") is income
-    (positive), everything else is an expense (negative).
+        DD.MM.YYYY <code> ... KZ...EUR <amount> <doc-id> Номер карты: ... Сумма
+        . транзакции: <amount> EUR Операция: <description>
+        карты в чужом устройстве        (wrapped tail)
+
+    The authoritative amount is the decimal printed in the HEADER line, right
+    before its 5-6 digit doc-id. When the header amount was dropped by OCR, we
+    fall back to the "транзакции: N EUR" / "сумме N EUR" line. Deposit-account
+    rows ("Вкладчик", "Прием вклада", ...) belong to a parallel account and are
+    skipped entirely — they do not change the card balance.
+
+    A refund ("Возврат") is income (positive); everything else is an expense
+    (negative).
     """
     records: list[dict] = []
 
-    # Freedom lays each card transaction across *lines*, not a single row:
-    #    DD.MM.YYYY <code> ... EUR <amount> <id> Номер карты: ... Сумма
-    #    . транзакции: <amount> EUR Операция: <description>
-    #    карты в чужом устройстве          (wrapped tail)
-    #
-    # Deposit-account rows carry "Вкладчик"/"Прием вклада" and are separate
-    # (they don't touch the card balance) — detect and skip them.
-    #
-    # So we do a single left-to-right pass: remember the most recent date seen
-    # on a card row, and whenever a "транзакции: N EUR Операция: ..." line
-    # appears, that is one transaction with that date and amount.
     lines = text.split("\n")
-    current_date: Optional[str] = None
+    i = 0
+    n = len(lines)
+    while i < n:
+        s = lines[i].strip()
 
-    for line in lines:
-        s = line.strip()
+        # A card header line: starts with a date AND mentions the card number /
+        # amount, AND is not a deposit-account row.
+        if _DATE_ROW_RE.match(s) and not _DEPOSIT_MARKERS.search(s) and (
+            "Номер карты" in s or "Сумма" in s or "карты" in s
+        ):
+            date_str = _DATE_ROW_RE.match(s).group(1)
+            header_amount = _header_amount(s)
 
-        # Update "current date" when a card row header appears. Deposit rows
-        # also start with a date, so only take date from lines that are NOT
-        # deposit markers.
-        if _DATE_ROW_RE.match(s) and not _DEPOSIT_MARKERS.search(s):
-            current_date = _DATE_ROW_RE.match(s).group(1)
+            # Collect this header plus following non-date continuation lines,
+            # where "транзакции: N EUR Операция: ..." / "сумме N EUR" may live.
+            tail_lines = [s]
+            j = i + 1
+            while j < n and not _DATE_ROW_RE.match(lines[j].strip()):
+                tail_lines.append(lines[j].strip())
+                j += 1
+            block = "\n".join(tail_lines)
 
-        if _DEPOSIT_MARKERS.search(s):
-            continue
+            amount = header_amount
+            if amount is None:
+                amount = _fallback_amount(block)
 
-        # The canonical transaction line carries both amount and operation.
-        m = _TX_AMOUNT_RE.search(s)
-        if not m:
-            continue
+            if amount is None:
+                i = j
+                continue
 
-        amount = _recover_amount(m.group(1))
-        is_refund = bool(re.search(r"Возврат", s, re.I))
-        description = _extract_description_from_line(s)
+            is_refund = bool(re.search(r"Возврат", block, re.I))
+            description = _extract_op(block)
 
-        records.append(
-            {
-                "date": _fmt_date(current_date) if current_date else "",
-                "tx_date": _fmt_date(current_date) if current_date else "",
-                "currency": currency,
-                "amount": round((1.0 if is_refund else -1.0) * amount, 2),
-                "description": description or "—",
-                "bank": BANK_NAME,
-                "tx_type": "normal",
-            }
-        )
+            records.append(
+                {
+                    "date": _fmt_date(date_str),
+                    "tx_date": _fmt_date(date_str),
+                    "currency": currency,
+                    "amount": round((1.0 if is_refund else -1.0) * amount, 2),
+                    "description": description or "—",
+                    "bank": BANK_NAME,
+                    "tx_type": "normal",
+                }
+            )
+            i = j
+        else:
+            i += 1
 
     return records
 
 
-def _recover_amount(raw: str) -> float:
-    """Parse a "транзакции: N" amount, fixing point-drop OCR glitches.
+def _header_amount(line: str) -> Optional[float]:
+    """Return the amount printed in a card header line, if present.
 
-    Tesseract sometimes drops the decimal point when the amount sits next to a
-    suffix ("19.13" -> "1913", "4.11" -> "411"). The reliable signal is that in
-    this statement every amount has exactly two decimals. So:
-      - "19.13" / "3.40" -> parse directly
-      - a bare integer NNN whose length is 3-4 digits is almost always NN.NN
-        with the point lost -> split the last two digits as the fraction.
+    The header looks like:  "DD.MM.YYYY <code> ... KZ...EUR <amount> <doc-id>
+    Номер карты: ... Сумма". The amount is the decimal sitting immediately
+    before the 5-6 digit doc-id (or before "Номер карты" when no doc-id).
     """
-    raw = raw.replace(",", ".").strip()
-    if "." in raw:
-        return _parse_number(raw)
-    # Bare integer: if it looks like a point-dropped 2-decimal value, split.
-    if raw.isdigit() and 3 <= len(raw) <= 4:
-        return float(raw[:-2] + "." + raw[-2:])
-    return _parse_number(raw)
+    # decimal followed by a 5-6 digit doc-id or by "Номер карты"
+    m = re.search(r"(\d{1,3}(?:[\s\u00a0]\d{3})*[.,]\d{1,2})\s+(?:\d{5,6}|Номер карты|Сумма)", line)
+    if m:
+        amt = _parse_number(m.group(1))
+        if amt > 0:
+            return amt
+    # fallback: any decimal after "EUR" in the header
+    m2 = re.search(r"EUR\s*(?:[—–-]\s*)?(\d{1,3}(?:[\s\u00a0]\d{3})*[.,]\d{1,2})", line)
+    if m2:
+        amt = _parse_number(m2.group(1))
+        if amt > 0:
+            return amt
+    return None
 
 
-def _extract_description_from_line(line: str) -> str:
-    """Recover the human description from a "транзакции: ... Операция: ..." line."""
-    m = re.search(r"Операция:\s*(.+?)(?:\s+(?:Дата|Код|Номер)\b|$)", line, re.I)
+def _fallback_amount(block: str) -> Optional[float]:
+    """Fallback amount from a 'транзакции: N EUR' / 'сумме N EUR' line.
+
+    This value is trusted only when it carries a decimal point; a bare integer
+    here may be a point-dropped glitch (1913) OR a genuine whole amount (250),
+    so we prefer the header and only end up here when the header was missing.
+    """
+    for m in _TX_AMOUNT_RE.finditer(block):
+        raw = m.group(1).replace(",", ".")
+        if "." in raw:
+            return _parse_number(raw)
+    for m in _SUMME_AMOUNT_RE.finditer(block):
+        return _parse_number(m.group(1))
+    # Last resort: bare integer from "транзакции" (accept as-is; better than none).
+    for m in _TX_AMOUNT_RE.finditer(block):
+        return _parse_number(m.group(1))
+    return None
+
+
+def _extract_op(block: str) -> str:
+    """Extract 'Операция: ...' text from a block, if present."""
+    m = re.search(r"Операция:\s*(.+?)(?:\s+(?:Дата|Код|Номер)\b|$)", block, re.I | re.S)
     if m:
         return _clean_description(m.group(1))
-    # Fallback: everything after the amount.
-    amount = _TX_AMOUNT_RE.search(line)
-    if amount:
-        tail = line[amount.end():]
-        return _clean_description(tail)
     return ""
 
 

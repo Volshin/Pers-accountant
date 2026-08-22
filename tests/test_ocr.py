@@ -54,38 +54,40 @@ def test_clean_description_collapses_and_trims_noise():
     assert desc == "Покупка с нашей карты"
 
 
+def test_clean_description_strips_inline_holder_noise():
+    desc = ocr._clean_description("Покупка с нашей Казахстан Валерьевич карты")
+    assert desc == "Покупка с нашей карты"
+
+
 def test_clean_description_handles_empty():
     assert ocr._clean_description("") == ""
 
 
-# ── _classify_internal ─────────────────────────────────────────────────────────
+# ── _header_amount / _fallback_amount ──────────────────────────────────────────
 
-def test_classify_internal_conversion():
-    assert ocr._classify_internal("23.02.2026 22053 ... Конвертация") == "Конвертация валюты"
-
-
-def test_classify_internal_deposit_out():
-    assert ocr._classify_internal("Выплата вклада с депозитного договора") == "Выплата вклада"
+def test_header_amount_from_decimal_before_docid():
+    line = "23.02.2026 91820 Банк ... К2655518629508749Е/В 54.91 254462 Номер карты: 5269 2208 Сумма"
+    assert ocr._header_amount(line) == 54.91
 
 
-def test_classify_internal_deposit_in():
-    assert ocr._classify_internal("Прием вклада по договору") == "Приём вклада"
+def test_header_amount_negative_cash_withdrawal():
+    line = "25.02.2026 514730 ... KZ65551B629S08749EUR — 250.00 173982 Номер карты: 5269 2208 Сумма"
+    assert ocr._header_amount(line) == 250.0
 
 
-def test_classify_internal_default():
-    assert ocr._classify_internal("что-то другое") == "Внутренний перевод"
+def test_header_amount_none_when_missing():
+    line = "24.02.2026 213612 ... KZ65551B629508749EUR i 106888 Номер карты: 5269 2208 Сумма"
+    assert ocr._header_amount(line) is None
 
 
-# ── _extract_internal_amount ───────────────────────────────────────────────────
-
-def test_extract_internal_amount_from_summe():
-    block = "Прием вклада по договору ... сумме 5187.89 EUR"
-    assert ocr._extract_internal_amount(block) == 5187.89
+def test_fallback_amount_from_transactions_decimal():
+    block = ". 188116 транзакции: 1188.16 EUR Операция: Покупка с нашей"
+    assert ocr._fallback_amount(block) == 1188.16
 
 
-def test_extract_internal_amount_fallback_decimal():
-    block = "Выплата вклада ... 257.55 KZ..."
-    assert ocr._extract_internal_amount(block) == 257.55
+def test_fallback_amount_ignores_summe_deposit():
+    block = "Прием вклада ... сумме 5187.89 EUR. Вкладчик"
+    assert ocr._fallback_amount(block) == 5187.89
 
 
 # ── balance check ──────────────────────────────────────────────────────────────
